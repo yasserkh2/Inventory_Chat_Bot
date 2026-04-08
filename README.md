@@ -1,6 +1,5 @@
 # Inventory Chatbot
 
-Interview submission for a schema-aware inventory analytics chatbot.
 
 The app answers business questions, returns the generated SQL (`present query`), and exposes both:
 - REST API: `POST /api/chat`
