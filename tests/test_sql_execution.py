@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 
 from inventory_chatbot.data.memory_repository import InMemoryRepository
-from inventory_chatbot.dynamic_sql.models import AggregateSpec, JoinSpec, QueryPlan, SelectSpec
+from inventory_chatbot.dynamic_sql.models import (
+    AggregateSpec,
+    FilterSpec,
+    JoinSpec,
+    QueryPlan,
+    SelectSpec,
+)
 from inventory_chatbot.sql_execution.models import SQLExecutionRequest
 from inventory_chatbot.sql_execution.service import SQLExecutionService, SQLExecutionServiceError
 
@@ -81,6 +87,28 @@ class SQLExecutionTests(unittest.TestCase):
         )
         with self.assertRaises(SQLExecutionServiceError):
             self.service.preview_sql(request)
+
+    def test_preview_auto_qualifies_unqualified_columns(self) -> None:
+        request = SQLExecutionRequest(
+            user_message="Find customer by code",
+            query_plan=QueryPlan(
+                base_table="Customers",
+                selects=[SelectSpec(column="CustomerName"), SelectSpec(column="BillingCity")],
+                filters=[
+                    FilterSpec(column="CustomerCode", operator="=", value="CUST-1004"),
+                ],
+                joins=[],
+                group_by=[],
+                order_by=[],
+                aggregates=[],
+            ),
+            source_agent="sales",
+            allowed_tables=["Customers", "SalesOrders", "SalesOrderLines", "Sites", "Items"],
+        )
+        sql = self.service.preview_sql(request)
+        self.assertIn("Customers.CustomerName", sql)
+        self.assertIn("Customers.BillingCity", sql)
+        self.assertIn("Customers.CustomerCode", sql)
 
 
 class _FakeQueryRunner:

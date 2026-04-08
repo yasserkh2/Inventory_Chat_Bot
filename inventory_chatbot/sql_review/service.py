@@ -26,6 +26,7 @@ class SQLReviewService:
     def review(self, request: SQLReviewRequest) -> SQLReviewResult:
         try:
             plan = self._parse_sql(request.sql_query)
+            plan = self._auto_qualify_unqualified_columns(plan)
             self._validate_allowed_tables(plan, request.allowed_tables)
             validated = self._validator.validate(plan)
         except (ValueError, QueryValidationError) as exc:
@@ -88,6 +89,130 @@ class SQLReviewService:
             order_by=order_by,
             limit=limit,
         )
+
+    def _auto_qualify_unqualified_columns(self, plan: QueryPlan) -> QueryPlan:
+        involved_tables = self._collect_involved_tables(plan)
+        base_table = plan.base_table
+
+        qualified_selects = [
+            select.model_copy(
+                update={
+                    "column": self._qualify_column_reference(
+                        select.column,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    )
+                }
+            )
+            for select in plan.selects
+        ]
+
+        qualified_aggregates = [
+            aggregate.model_copy(
+                update={
+                    "column": (
+                        aggregate.column
+                        if aggregate.column == "*"
+                        else self._qualify_column_reference(
+                            aggregate.column,
+                            involved_tables=involved_tables,
+                            base_table=base_table,
+                        )
+                    )
+                }
+            )
+            for aggregate in plan.aggregates
+        ]
+
+        qualified_joins = [
+            join.model_copy(
+                update={
+                    "left": self._qualify_column_reference(
+                        join.left,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    ),
+                    "right": self._qualify_column_reference(
+                        join.right,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    ),
+                }
+            )
+            for join in plan.joins
+        ]
+
+        qualified_filters = [
+            query_filter.model_copy(
+                update={
+                    "column": self._qualify_column_reference(
+                        query_filter.column,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    )
+                }
+            )
+            for query_filter in plan.filters
+        ]
+
+        qualified_group_by = [
+            self._qualify_column_reference(
+                group_by,
+                involved_tables=involved_tables,
+                base_table=base_table,
+            )
+            for group_by in plan.group_by
+        ]
+
+        return plan.model_copy(
+            update={
+                "selects": qualified_selects,
+                "aggregates": qualified_aggregates,
+                "joins": qualified_joins,
+                "filters": qualified_filters,
+                "group_by": qualified_group_by,
+            }
+        )
+
+    def _collect_involved_tables(self, plan: QueryPlan) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+
+        def add_table(table_name: str) -> None:
+            if table_name in self._schema_catalog and table_name not in seen:
+                seen.add(table_name)
+                ordered.append(table_name)
+
+        add_table(plan.base_table)
+        for join in plan.joins:
+            if "." in join.left:
+                add_table(join.left.split(".", 1)[0])
+            if "." in join.right:
+                add_table(join.right.split(".", 1)[0])
+        return ordered
+
+    def _qualify_column_reference(
+        self,
+        column_reference: str,
+        *,
+        involved_tables: list[str],
+        base_table: str,
+    ) -> str:
+        if "." in column_reference:
+            return column_reference
+
+        candidates = [
+            table_name
+            for table_name in involved_tables
+            if column_reference in self._schema_catalog[table_name]["columns"]
+        ]
+        if not candidates:
+            return column_reference
+        if len(candidates) == 1:
+            return f"{candidates[0]}.{column_reference}"
+        if base_table in candidates:
+            return f"{base_table}.{column_reference}"
+        return column_reference
 
     @staticmethod
     def _extract_trailing_limit(remainder: str) -> tuple[str, int | None]:
@@ -380,7 +505,8 @@ class SQLReviewService:
             used_tables.add(join.left.split(".", 1)[0])
             used_tables.add(join.right.split(".", 1)[0])
         for query_filter in plan.filters:
-            used_tables.add(query_filter.column.split(".", 1)[0])
+            if "." in query_filter.column:
+                used_tables.add(query_filter.column.split(".", 1)[0])
         for group_by_expression in plan.group_by:
             if "." in group_by_expression:
                 used_tables.add(group_by_expression.split(".", 1)[0])

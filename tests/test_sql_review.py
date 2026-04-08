@@ -109,6 +109,43 @@ class SQLReviewTests(unittest.TestCase):
         self.assertEqual(result.normalized_query_plan.limit, 5)
         self.assertEqual(result.normalized_query_plan.order_by[0].expression, "Customers.CustomerId")
 
+    def test_review_auto_qualifies_unqualified_columns_in_single_table_query(self) -> None:
+        result = self.service.review(
+            SQLReviewRequest(
+                user_message="What are the name and billing city for customer code CUST-1004?",
+                sql_query=(
+                    "SELECT CustomerName, BillingCity "
+                    "FROM Customers "
+                    "WHERE CustomerCode = 'CUST-1004';"
+                ),
+                source_agent="sales",
+                allowed_tables=["Customers", "SalesOrders", "SalesOrderLines", "Sites", "Items"],
+            )
+        )
+        self.assertTrue(result.approved)
+        self.assertIsNotNone(result.normalized_query_plan)
+        plan = result.normalized_query_plan
+        self.assertEqual(plan.selects[0].column, "Customers.CustomerName")
+        self.assertEqual(plan.selects[1].column, "Customers.BillingCity")
+        self.assertEqual(plan.filters[0].column, "Customers.CustomerCode")
+
+    def test_review_auto_qualifies_unqualified_filter_column_for_count_query(self) -> None:
+        result = self.service.review(
+            SQLReviewRequest(
+                user_message="How many active customers do we have?",
+                sql_query=(
+                    "SELECT COUNT(*) AS ActiveCustomers "
+                    "FROM Customers "
+                    "WHERE IsActive = 1;"
+                ),
+                source_agent="sales",
+                allowed_tables=["Customers", "SalesOrders", "SalesOrderLines", "Sites", "Items"],
+            )
+        )
+        self.assertTrue(result.approved)
+        self.assertIsNotNone(result.normalized_query_plan)
+        self.assertEqual(result.normalized_query_plan.filters[0].column, "Customers.IsActive")
+
 
 if __name__ == "__main__":
     unittest.main()

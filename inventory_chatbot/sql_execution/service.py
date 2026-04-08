@@ -42,21 +42,27 @@ class SQLExecutionService:
         return "query_plan" in context or "sql_query" in context
 
     def preview_sql(self, request: SQLExecutionRequest) -> str:
-        self._validate_allowed_tables(request)
+        _validated, sql_preview = self._prepare_query(request)
+        return sql_preview
+
+    def _prepare_query(self, request: SQLExecutionRequest) -> tuple[QueryPlan, str]:
+        normalized_plan = self._auto_qualify_unqualified_columns(request.query_plan)
+        normalized_request = request.model_copy(update={"query_plan": normalized_plan})
+        self._validate_allowed_tables(normalized_request)
         try:
-            validated = self._validator.validate(request.query_plan)
+            validated = self._validator.validate(normalized_plan)
         except QueryValidationError as exc:
             raise SQLExecutionServiceError(str(exc)) from exc
-        return self._compiler.compile(validated)
+        return validated, self._compiler.compile(validated)
 
     def execute(self, request: SQLExecutionRequest) -> tuple[ComputedResult, str]:
-        sql_preview = self.preview_sql(request)
+        validated_plan, sql_preview = self._prepare_query(request)
         sql_query = request.sql_query or sql_preview
         if self._query_runner is not None:
             try:
                 rows = self._query_runner.execute_sql(
                     sql_query=sql_query,
-                    query_plan=request.query_plan,
+                    query_plan=validated_plan,
                 )
             except Exception as exc:  # pragma: no cover - depends on runtime DB
                 raise SQLExecutionServiceError(str(exc)) from exc
@@ -80,7 +86,7 @@ class SQLExecutionService:
                 user_message=request.user_message,
                 context={
                     **request.context,
-                    "query_plan": request.query_plan.model_dump(),
+                    "query_plan": validated_plan.model_dump(),
                     "sql_query": request.sql_query,
                 },
             )
@@ -130,7 +136,8 @@ class SQLExecutionService:
             tables.add(join.left.split(".", 1)[0])
             tables.add(join.right.split(".", 1)[0])
         for query_filter in query_plan.filters:
-            tables.add(query_filter.column.split(".", 1)[0])
+            if "." in query_filter.column:
+                tables.add(query_filter.column.split(".", 1)[0])
         for group_by in query_plan.group_by:
             if "." in group_by:
                 tables.add(group_by.split(".", 1)[0])
@@ -138,3 +145,127 @@ class SQLExecutionService:
             if "." in order_by.expression:
                 tables.add(order_by.expression.split(".", 1)[0])
         return tables
+
+    def _auto_qualify_unqualified_columns(self, plan: QueryPlan) -> QueryPlan:
+        involved_tables = self._collect_involved_tables(plan)
+        base_table = plan.base_table
+
+        qualified_selects = [
+            select.model_copy(
+                update={
+                    "column": self._qualify_column_reference(
+                        select.column,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    )
+                }
+            )
+            for select in plan.selects
+        ]
+
+        qualified_aggregates = [
+            aggregate.model_copy(
+                update={
+                    "column": (
+                        aggregate.column
+                        if aggregate.column == "*"
+                        else self._qualify_column_reference(
+                            aggregate.column,
+                            involved_tables=involved_tables,
+                            base_table=base_table,
+                        )
+                    )
+                }
+            )
+            for aggregate in plan.aggregates
+        ]
+
+        qualified_joins = [
+            join.model_copy(
+                update={
+                    "left": self._qualify_column_reference(
+                        join.left,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    ),
+                    "right": self._qualify_column_reference(
+                        join.right,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    ),
+                }
+            )
+            for join in plan.joins
+        ]
+
+        qualified_filters = [
+            query_filter.model_copy(
+                update={
+                    "column": self._qualify_column_reference(
+                        query_filter.column,
+                        involved_tables=involved_tables,
+                        base_table=base_table,
+                    )
+                }
+            )
+            for query_filter in plan.filters
+        ]
+
+        qualified_group_by = [
+            self._qualify_column_reference(
+                group_by,
+                involved_tables=involved_tables,
+                base_table=base_table,
+            )
+            for group_by in plan.group_by
+        ]
+
+        return plan.model_copy(
+            update={
+                "selects": qualified_selects,
+                "aggregates": qualified_aggregates,
+                "joins": qualified_joins,
+                "filters": qualified_filters,
+                "group_by": qualified_group_by,
+            }
+        )
+
+    def _collect_involved_tables(self, plan: QueryPlan) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+
+        def add_table(table_name: str) -> None:
+            if table_name in self._schema_catalog and table_name not in seen:
+                seen.add(table_name)
+                ordered.append(table_name)
+
+        add_table(plan.base_table)
+        for join in plan.joins:
+            if "." in join.left:
+                add_table(join.left.split(".", 1)[0])
+            if "." in join.right:
+                add_table(join.right.split(".", 1)[0])
+        return ordered
+
+    def _qualify_column_reference(
+        self,
+        column_reference: str,
+        *,
+        involved_tables: list[str],
+        base_table: str,
+    ) -> str:
+        if "." in column_reference:
+            return column_reference
+
+        candidates = [
+            table_name
+            for table_name in involved_tables
+            if column_reference in self._schema_catalog[table_name]["columns"]
+        ]
+        if not candidates:
+            return column_reference
+        if len(candidates) == 1:
+            return f"{candidates[0]}.{column_reference}"
+        if base_table in candidates:
+            return f"{base_table}.{column_reference}"
+        return column_reference
