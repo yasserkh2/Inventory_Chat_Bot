@@ -1,0 +1,170 @@
+erDiagram
+    Customers {
+        int CustomerId PK
+        string CustomerCode UK
+        string CustomerName
+        string Email
+        string Phone
+        string BillingAddress1
+        string BillingCity
+        string BillingCountry
+        datetime CreatedAt
+        datetime UpdatedAt
+        boolean IsActive
+    }
+
+    Vendors {
+        int VendorId PK
+        string VendorCode UK
+        string VendorName
+        string Email
+        string Phone
+        string AddressLine1
+        string City
+        string Country
+        datetime CreatedAt
+        datetime UpdatedAt
+        boolean IsActive
+    }
+
+    Sites {
+        int SiteId PK
+        string SiteCode UK
+        string SiteName
+        string AddressLine1
+        string City
+        string Country
+        string TimeZone
+        datetime CreatedAt
+        datetime UpdatedAt
+        boolean IsActive
+    }
+
+    Locations {
+        int LocationId PK
+        int SiteId FK
+        string LocationCode
+        string LocationName
+        int ParentLocationId FK
+        datetime CreatedAt
+        datetime UpdatedAt
+        boolean IsActive
+    }
+
+    Items {
+        int ItemId PK
+        string ItemCode UK
+        string ItemName
+        string Category
+        string UnitOfMeasure
+        datetime CreatedAt
+        datetime UpdatedAt
+        boolean IsActive
+    }
+
+    Assets {
+        int AssetId PK
+        string AssetTag UK
+        string AssetName
+        int SiteId FK
+        int LocationId FK
+        string SerialNumber
+        string Category
+        string Status
+        decimal Cost
+        date PurchaseDate
+        int VendorId FK
+        datetime CreatedAt
+        datetime UpdatedAt
+    }
+
+    Bills {
+        int BillId PK
+        int VendorId FK
+        string BillNumber
+        date BillDate
+        date DueDate
+        decimal TotalAmount
+        string Currency
+        string Status
+        datetime CreatedAt
+        datetime UpdatedAt
+    }
+
+    PurchaseOrders {
+        int POId PK
+        string PONumber UK
+        int VendorId FK
+        date PODate
+        string Status
+        int SiteId FK
+        datetime CreatedAt
+        datetime UpdatedAt
+    }
+
+    PurchaseOrderLines {
+        int POLineId PK
+        int POId FK
+        int LineNumber
+        int ItemId FK
+        string ItemCode
+        string Description
+        decimal Quantity
+        decimal UnitPrice
+    }
+
+    SalesOrders {
+        int SOId PK
+        string SONumber UK
+        int CustomerId FK
+        date SODate
+        string Status
+        int SiteId FK
+        datetime CreatedAt
+        datetime UpdatedAt
+    }
+
+    SalesOrderLines {
+        int SOLineId PK
+        int SOId FK
+        int LineNumber
+        int ItemId FK
+        string ItemCode
+        string Description
+        decimal Quantity
+        decimal UnitPrice
+    }
+
+    AssetTransactions {
+        int AssetTxnId PK
+        int AssetId FK
+        int FromLocationId FK
+        int ToLocationId FK
+        string TxnType
+        int Quantity
+        datetime TxnDate
+        string Note
+    }
+
+    Sites ||--o{ Locations : contains
+    Locations o|--o{ Locations : parent_of
+
+    Sites ||--o{ Assets : hosts
+    Locations o|--o{ Assets : stores
+    Vendors o|--o{ Assets : supplies
+
+    Vendors ||--o{ Bills : bills
+
+    Vendors ||--o{ PurchaseOrders : receives
+    Sites o|--o{ PurchaseOrders : placed_for
+    PurchaseOrders ||--o{ PurchaseOrderLines : has
+    Items o|--o{ PurchaseOrderLines : referenced_by
+
+    Customers ||--o{ SalesOrders : places
+    Sites o|--o{ SalesOrders : fulfilled_from
+    SalesOrders ||--o{ SalesOrderLines : has
+    Items o|--o{ SalesOrderLines : referenced_by
+
+    Assets ||--o{ AssetTransactions : logs
+    Locations o|--o{ AssetTransactions : from_location
+    Locations o|--o{ AssetTransactions : to_location

@@ -1,0 +1,15 @@
+# Base application defaults.
+# Precedence: config.yml < .env < real environment variables
+
+provider: azure
+model_name: gpt-4.1-mini
+host: 0.0.0.0
+port: 8000
+request_timeout_seconds: 20
+azure_openai_api_version: 2024-10-21
+
+azure_openai_endpoint: ""
+azure_openai_api_key: ""
+azure_openai_deployment: ""
+openai_api_key: ""
+

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Inventory Chatbot</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero-panel">
+        <p class="eyebrow">Inventory Analytics Demo</p>
+        <h1>Ask a business question and inspect the exact SQL.</h1>
+        <p class="subtitle">
+          This v1 demo routes each request through deterministic specialists, then
+          shows the SQL Server query that would run in production.
+        </p>
+      </section>
+
+      <section class="workspace">
+        <form id="chat-form" class="chat-form">
+          <label>
+            <span>Session ID</span>
+            <input id="session-id" name="session_id" value="demo-session" />
+          </label>
+
+          <label>
+            <span>Message</span>
+            <textarea
+              id="message"
+              name="message"
+              rows="4"
+              placeholder="How many assets by site?"
+            ></textarea>
+          </label>
+
+          <button id="submit-button" type="submit">Send Query</button>
+        </form>
+
+        <section class="chat-layout">
+          <article class="card transcript-card">
+            <div class="transcript-header">
+              <h2>Conversation</h2>
+              <button id="clear-history-button" type="button" class="ghost-button">Refresh History</button>
+            </div>
+            <div id="chat-history" class="chat-history">
+              <p class="empty-history">No messages yet. Start the conversation.</p>
+            </div>
+          </article>
+
+          <section class="result-grid">
+          <article class="card">
+            <h2>Answer</h2>
+            <p id="answer">Responses will appear here.</p>
+          </article>
+
+          <article class="card result-preview-card">
+            <h2>Result Preview</h2>
+            <div id="result-preview" class="result-preview">
+              <p class="empty-history">Structured results will appear here.</p>
+            </div>
+          </article>
+
+          <article class="card">
+            <h2>SQL Query</h2>
+            <pre id="sql-query">No query yet.</pre>
+          </article>
+
+          <article class="card metadata-card">
+            <h2>Metadata</h2>
+            <dl id="metadata">
+              <div><dt>Status</dt><dd>n/a</dd></div>
+              <div><dt>Provider</dt><dd>n/a</dd></div>
+              <div><dt>Model</dt><dd>n/a</dd></div>
+              <div><dt>Latency</dt><dd>n/a</dd></div>
+              <div><dt>Tokens</dt><dd>n/a</dd></div>
+            </dl>
+          </article>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
