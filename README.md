@@ -1,57 +1,39 @@
 # Inventory Chatbot
 
-Minimal inventory analytics chatbot for the interview task. The service exposes a REST API, keeps in-memory session context, routes questions through deterministic domain specialists, and returns both a natural-language answer and the exact SQL query used for execution.
+Interview submission for a schema-aware inventory analytics chatbot.
 
-## Architecture
+The app answers business questions, returns the generated SQL (`present query`), and exposes both:
+- REST API: `POST /api/chat`
+- Streamlit UI
 
-- `RouterService` handles request validation, session-aware dispatch, specialist execution, dynamic SQL execution, and final answer phrasing.
-- `inventory_chatbot/orchestrator` is a standalone package responsible for LLM-based routing, schema-aware analysis, and agent handoff preparation.
-- `inventory_chatbot/sql_backend` is a standalone package that owns SQL backend connection lifecycle, repository reads, validated SQL execution, row mapping, and startup health checks.
-- `inventory_chatbot/runtime/backend_factory.py` is the single wiring entrypoint that builds memory-mode, SQLite-mode, or SQL Server-mode dependencies for API, CLI, and Streamlit.
-- Domain specialists own supported intents, query plans, SQL templates, and deterministic calculations.
-- `LLMQueryMaker` focuses only on query planning for the chosen domain instead of also deciding routing.
-- `InMemoryRepository` remains available for tests/local fallback mode, while SQLite and SQL Server modes execute reviewed SQL against a real database.
-- OpenAI and Azure OpenAI providers are supported through the official OpenAI Python SDK clients.
+## What This Project Demonstrates
 
-This is intentionally not a RAG system and not a free-form text-to-SQL system. The orchestrator decides which agent should handle the request, and SQL is rendered only from vetted templates or validated dynamic query plans.
+- LLM-based orchestration (route to the right domain agent)
+- LLM-based SQL planning with review + execution pipeline
+- SQL safety checks (schema/domain validation)
+- In-memory session context
+- Multiple data backends: `memory`, `sqlite`
+- OpenAI/Azure OpenAI provider switch via env
 
-## Current Status (2026-04-08)
+## Project Structure (Key Files)
 
-- Core architecture is implemented: orchestrator, specialists, planner, SQL review, SQL execution, API, Streamlit, and backend factory.
-- Real backend modes are implemented: `memory`, `sqlite` (recommended local), and `sqlserver`.
-- Pipeline trace diagnostics are stabilized: `orchestrator_failed` now includes `steps.orchestrator_debug`.
-- Provider connectivity failures are surfaced with cause details (for example DNS resolution errors).
-- Latest full test discovery run:
-  - total: `89`
-  - failing: `1` (`test_sales_named_customer_carryover`)
-  - skipped: `3` (SQL Server integration tests, env-gated)
+- `inventory_chatbot/main.py`: API server entrypoint
+- `inventory_chatbot/streamlit_app.py`: Streamlit UI entrypoint
+- `inventory_chatbot/orchestrator/`: routing + handoff layer
+- `inventory_chatbot/sql_agents/`: domain SQL planning agents
+- `inventory_chatbot/sql_review/`: SQL normalization and validation
+- `inventory_chatbot/sql_execution/`: SQL preview/execution service
+- `inventory_chatbot/sql_backend/`: SQL backend init + wiring
+- `inventory_chatbot/runtime/backend_factory.py`: backend wiring for API/UI/CLI
 
-Detailed progress logs:
+## Prerequisites
 
-- [WORK_DONE_LOG.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/WORK_DONE_LOG.md)
-- [DECISIONS_LOG.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/DECISIONS_LOG.md)
-- [ORCHESTRATOR_EXPLANATION.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/ORCHESTRATOR_EXPLANATION.md)
-- [SQL_BACKEND_IMPLEMENTATION_SUMMARY.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/SQL_BACKEND_IMPLEMENTATION_SUMMARY.md)
+- Python `3.12+`
+- SQLite (stdlib, no external DB required)
 
-## Supported Intents
+## 5-Minute Quick Start (Recommended for Interviewer)
 
-- Total active asset count
-- Asset count by site
-- Total asset value by site
-- Assets purchased this year
-- Vendor that supplied the most active assets
-- Total billed amount for the last quarter
-- Count of open purchase orders
-- Asset breakdown by category
-- Sales order count for a named customer last month
-
-## Requirements
-
-- Python 3.12+
-- SQLite (built into Python via stdlib `sqlite3`) for local mode
-- ODBC Driver 18 for SQL Server (only required in SQL Server mode)
-
-Install locally:
+### 1) Create environment and install
 
 ```bash
 python3 -m venv .venv
@@ -60,229 +42,107 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## Environment Variables
+### 2) Configure provider + backend
 
-The app now loads configuration in this order:
+Use `.env` (recommended) or export env vars.
 
-1. `config.yml`
-2. `.env`
-3. real shell environment variables
-
-So `config.yml` is the base config, `.env` is your local developer override, and exported environment variables win last.
-
-Base config lives in [config.yml](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/config.yml) and local secrets live in [.env](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/.env).
-
-```bash
-export PROVIDER=azure
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-export AZURE_OPENAI_API_KEY="..."
-export AZURE_OPENAI_DEPLOYMENT="your-deployment"
-export MODEL_NAME="gpt-4.1-mini"
-export PORT=8000
-```
-
-OpenAI alternative:
+OpenAI example:
 
 ```bash
 export PROVIDER=openai
-export OPENAI_API_KEY="..."
+export OPENAI_API_KEY="<your-key>"
 export MODEL_NAME="gpt-4.1-mini"
-```
-
-You can also edit `.env` directly instead of exporting variables for each run.
-
-SQL backend options:
-
-```bash
 export DATA_BACKEND=sqlite
 export SQLITE_DATABASE_PATH=inventory_chatbot.sqlite3
 ```
 
-SQL Server alternative:
+Azure OpenAI example:
 
 ```bash
-export DATA_BACKEND=sqlserver
-export SQLSERVER_HOST=127.0.0.1
-export SQLSERVER_PORT=1433
-export SQLSERVER_DATABASE=InventoryChatbot
-export SQLSERVER_USER=sa
-export SQLSERVER_PASSWORD='YourStrong!Passw0rd'
-export SQLSERVER_DRIVER='ODBC Driver 18 for SQL Server'
-export SQLSERVER_ENCRYPT=false
-export SQLSERVER_TRUST_SERVER_CERTIFICATE=true
-export SQLSERVER_CONNECTION_TIMEOUT_SECONDS=30
-```
-
-When `DATA_BACKEND` is `sqlite` or `sqlserver`, startup is fail-fast: the app validates backend config and checks DB connectivity (`SELECT 1`) before serving requests.
-
-## SQLite Quick Start (Recommended)
-
-```bash
-source .venv/bin/activate
+export PROVIDER=azure
+export AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com/"
+export AZURE_OPENAI_API_KEY="<your-key>"
+export AZURE_OPENAI_DEPLOYMENT="<deployment-name>"
+export MODEL_NAME="gpt-4.1-mini"
 export DATA_BACKEND=sqlite
 export SQLITE_DATABASE_PATH=inventory_chatbot.sqlite3
+```
+
+### 3) Initialize SQLite schema + seed data
+
+```bash
 python -m inventory_chatbot.sql_backend.db_init
-python -m streamlit run inventory_chatbot/streamlit_app.py
 ```
 
-This is the easiest local setup and does not require Docker or ODBC drivers.
-
-## SQL Server Bootstrap
-
-Start SQL Server (Docker):
+### 4) Run API server
 
 ```bash
-docker compose -f docker-compose.sqlserver.yml up -d
-```
-
-Initialize schema + seed data into SQL Server:
-
-```bash
-source .venv/bin/activate
-DATA_BACKEND=sqlserver python -m inventory_chatbot.sql_backend.db_init
-```
-
-This creates all tables from the app schema catalog and loads the same seed dataset used in memory mode.
-
-## Run
-
-```bash
-source .venv/bin/activate
 python -m inventory_chatbot.main
 ```
 
-Open the UI at `http://localhost:8000`.
+Server starts at: `http://localhost:8000`
 
-## Standalone Orchestrator
-
-You can test the orchestrator directly without going through the full chatbot flow:
-
-```bash
-source .venv/bin/activate
-python -m inventory_chatbot.orchestrator_cli "How many assets by site?" --pretty
-```
-
-Useful standalone modes:
-
-```bash
-python -m inventory_chatbot.orchestrator_cli "How many assets by site?" --prompt-only
-python -m inventory_chatbot.orchestrator_cli "How many assets by site?" --show-prompt --pretty
-python -m inventory_chatbot.orchestrator_cli "How many assets by site?" --show-context
-python -m inventory_chatbot.orchestrator_cli "Show me the first 5 rows of customers table" --max-iterations 3 --pretty
-```
-
-What the standalone orchestrator does:
-
-- Loads the same config and provider credentials as the main app.
-- Builds the same schema-aware prompt context used by the router.
-- Runs a bounded orchestration loop with self-review before returning a structured decision.
-- Returns JSON with the selected agent, user need summary, required data, handoff instructions, and clarification details when needed.
-
-Detailed documentation lives in [ORCHESTRATOR_EXPLANATION.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/ORCHESTRATOR_EXPLANATION.md).
-
-## Streamlit UI
-
-You can also run the chatbot as a Streamlit app:
-
-```bash
-source .venv/bin/activate
-python -m streamlit run inventory_chatbot/streamlit_app.py
-```
-
-This launches a chat-style UI that talks to the same router service directly and shows SQL for query-backed answers.
-
-Streamlit UI notes:
-
-- Uses the same hardened router flow as the API (orchestrator -> specialist/planner -> SQL execution).
-- Renders SQL, result preview, and metadata per assistant reply.
-- Safely serializes `date`/`datetime` values in previews to avoid UI crashes.
-- Includes sidebar toggles to show/hide result preview and metadata.
-
-## Tests
-
-Run the unit/service tests:
-
-```bash
-source .venv/bin/activate
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-Run Docker-backed SQL Server integration tests (optional):
-
-```bash
-source .venv/bin/activate
-export RUN_SQLSERVER_INTEGRATION=1
-python -m unittest tests.test_sqlserver_integration -v
-```
-
-## API Example
+### 5) Smoke test API
 
 ```bash
 curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "demo-session",
-    "message": "How many assets by site?",
+    "message": "What is the total cost of non-disposed assets?",
     "context": {}
   }'
 ```
 
-Example response shape:
+You should receive JSON with:
+- `natural_language_answer`
+- `sql_query`
+- `token_usage`
+- `latency_ms`
+- `provider`, `model`, `status`
 
-```json
-{
-  "natural_language_answer": "Here is the asset count by site...",
-  "sql_query": "SELECT s.SiteName, COUNT(*) AS AssetCount ...",
-  "token_usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 5,
-    "total_tokens": 15
-  },
-  "latency_ms": 24,
-  "provider": "azure",
-  "model": "gpt-4.1-mini",
-  "status": "ok"
-}
-```
-
-## Recent Stabilization Updates (2026-04-08)
-
-The latest debugging and hardening pass focused on pipeline trace reliability, SQL handoff safety, and clearer failure diagnostics.
-
-1. Added orchestrator debug trace visibility in pipeline traces.
-2. Expanded provider error messages to include root causes (for example DNS resolution failures).
-3. Prevented SQL handoff crashes when SQL-agent output is incomplete.
-4. Made pipeline trace JSON serialization robust for `date`/`datetime` values.
-5. Added regression tests for all of the above.
-6. Added SQLite real-backend mode for easier local execution without ODBC.
-7. Extended SQL review/parser support for SQLite `LIMIT` syntax.
-
-New behavior in trace diagnostics:
-
-- `orchestrator_failed` now includes `steps.orchestrator_debug` with attempt status and provider error details.
-- `handoff_failed` is returned when execution-request construction fails, instead of throwing an uncaught traceback.
-
-Example trace command:
+## Run Streamlit UI
 
 ```bash
 source .venv/bin/activate
-python -m inventory_chatbot.pipeline_trace_cli "Show total invoice amount by vendor for last quarter" --pretty
+python -m streamlit run inventory_chatbot/streamlit_app.py
 ```
 
-Expected failure diagnostics when provider networking is unavailable:
+## Configuration Notes
 
-- `path: orchestrator_failed`
-- `steps.orchestrator_debug.status: provider_error`
-- `steps.orchestrator_debug.error` includes connection/DNS cause text
+Config resolution order:
+1. `config.yml`
+2. `.env`
+3. shell environment variables (highest priority)
 
-Detailed implementation log and architectural decisions are tracked in [DECISIONS_LOG.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/DECISIONS_LOG.md).
+Important env vars:
+- Provider: `PROVIDER`, `MODEL_NAME`
+- OpenAI: `OPENAI_API_KEY`
+- Azure: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT`
+- Backend: `DATA_BACKEND=memory|sqlite`
+- SQLite: `SQLITE_DATABASE_PATH`
+- API bind: `HOST`, `PORT`
 
-## Notes And Tradeoffs
+## Run Tests
 
-- SQLite mode executes reviewed SQL against a real local DB and is recommended for local development.
-- SQL Server mode remains available for interview reproducibility with Docker.
-- Memory mode is still available for deterministic tests and local lightweight runs.
-- Provider failures return a controlled API error.
-- The orchestrator is now separated from the router for cleaner responsibilities and easier prompt iteration.
-- The orchestrator loop is bounded to keep behavior predictable while still allowing limited self-correction.
-- Authentication and broad unrestricted text-to-SQL are intentionally out of scope for this interview implementation.
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Integration tests beyond the local stack are not included in this streamlined interview submission.
+
+## Example Questions
+
+- `How many assets do I have?`
+- `How many assets by site?`
+- `What is the total value of assets per site?`
+- `What is the total billed amount for the last quarter?`
+- `How many open purchase orders are currently pending?`
+- `How many sales orders were created for Acme Corp last month?`
+
+## Notes
+
+- The system is schema-aware and validates SQL before execution.
+- It is intentionally constrained to the provided domain schema (not unrestricted text-to-SQL).
+- SQLite mode is the fastest path for interviewer evaluation.
