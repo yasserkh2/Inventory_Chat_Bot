@@ -88,6 +88,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn('"description": "Master data for customers who place sales orders."', context)
         self.assertIn('"CustomerName"', context)
         self.assertIn('"description": "Display name of the customer."', context)
+        self.assertIn('"value_hints": [', context)
 
     def test_orchestrator_returns_structured_decision(self) -> None:
         decision = self.orchestrator.decide(

@@ -89,6 +89,29 @@ COMMON_COLUMN_DESCRIPTIONS: dict[str, str] = {
     "TxnType": "Type of asset movement or adjustment that occurred.",
 }
 
+COMMON_COLUMN_VALUE_HINTS: dict[str, list[str]] = {
+    "IsActive": ["0", "1"],
+}
+
+TABLE_COLUMN_VALUE_HINTS: dict[str, dict[str, list[str]]] = {
+    "Assets": {
+        "Status": ["Active", "InRepair", "Disposed"],
+    },
+    "Bills": {
+        "Status": ["Open", "Paid", "Void"],
+        "Currency": ["USD"],
+    },
+    "PurchaseOrders": {
+        "Status": ["Open", "Approved", "Closed", "Cancelled"],
+    },
+    "SalesOrders": {
+        "Status": ["Open", "Shipped", "Closed", "Cancelled"],
+    },
+    "AssetTransactions": {
+        "TxnType": ["Move", "Adjust", "Dispose", "Create"],
+    },
+}
+
 TABLE_COLUMN_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "Customers": {
         "CustomerCode": "Business-friendly customer code.",
@@ -174,3 +197,10 @@ def describe_column(
     if column_name.endswith("Id"):
         return f"Identifier field stored on the {TABLE_ENTITY_LABELS.get(table_name, table_name.lower())} record."
     return f"{column_name} value stored for the {TABLE_ENTITY_LABELS.get(table_name, table_name.lower())} record."
+
+
+def describe_column_value_hints(*, table_name: str, column_name: str) -> list[str]:
+    table_hints = TABLE_COLUMN_VALUE_HINTS.get(table_name, {})
+    if column_name in table_hints:
+        return table_hints[column_name]
+    return COMMON_COLUMN_VALUE_HINTS.get(column_name, [])

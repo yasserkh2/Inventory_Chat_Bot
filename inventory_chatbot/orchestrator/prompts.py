@@ -8,6 +8,7 @@ from inventory_chatbot.orchestrator.metadata import (
     AGENT_RESPONSIBILITIES,
     TABLE_DESCRIPTIONS,
     describe_column,
+    describe_column_value_hints,
 )
 
 
@@ -20,15 +21,13 @@ def build_orchestrator_context(*, today: date, customer_names: list[str]) -> str
             "description": TABLE_DESCRIPTIONS.get(table_name, ""),
             "primary_key": primary_key,
             "columns": {
-                column_name: {
-                    "type": column_type,
-                    "description": describe_column(
-                        table_name=table_name,
-                        column_name=column_name,
-                        primary_key=primary_key,
-                        joins=joins,
-                    ),
-                }
+                column_name: _build_column_metadata(
+                    table_name=table_name,
+                    column_name=column_name,
+                    column_type=column_type,
+                    primary_key=primary_key,
+                    joins=joins,
+                )
                 for column_name, column_type in table["columns"].items()
             },
             "joins": {
@@ -103,6 +102,8 @@ def build_orchestrator_user_prompt(
         "- Route to procurement for PurchaseOrders and PurchaseOrderLines questions.\n"
         "- Route to sales for SalesOrders, SalesOrderLines, and Customers questions.\n"
         "- Translate business words to canonical schema references in required_data and handoff instructions (example: currency -> Bills.Currency).\n"
+        "- Resolve metric words before handoff: count/how many -> COUNT, total cost/value/amount -> SUM on the matching monetary column, average -> AVG.\n"
+        "- If user metric is explicit, preserve it in handoff instructions and do not swap it for another metric.\n"
         "- Never treat a column name as a table name.\n"
         "- Route greetings, schema explanations, table discovery, column discovery, and relationship explanations to chat.\n"
         "- If the user asks to retrieve rows, inspect records, list data, or compute a metric, do not choose chat.\n"
@@ -110,3 +111,26 @@ def build_orchestrator_user_prompt(
         "- If previous review feedback is present, fix those issues in this pass instead of repeating the same draft.\n"
         "- If unsupported, return agent as none.\n"
     )
+
+
+def _build_column_metadata(
+    *,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+    primary_key: str,
+    joins: dict[str, tuple[str, str]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "type": column_type,
+        "description": describe_column(
+            table_name=table_name,
+            column_name=column_name,
+            primary_key=primary_key,
+            joins=joins,
+        ),
+    }
+    value_hints = describe_column_value_hints(table_name=table_name, column_name=column_name)
+    if value_hints:
+        payload["value_hints"] = value_hints
+    return payload

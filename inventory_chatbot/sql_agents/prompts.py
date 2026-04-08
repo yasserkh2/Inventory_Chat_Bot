@@ -4,7 +4,11 @@ import json
 from datetime import date
 
 from inventory_chatbot.dynamic_sql.schema_catalog import SCHEMA_CATALOG
-from inventory_chatbot.orchestrator.metadata import TABLE_DESCRIPTIONS, describe_column
+from inventory_chatbot.orchestrator.metadata import (
+    TABLE_DESCRIPTIONS,
+    describe_column,
+    describe_column_value_hints,
+)
 from inventory_chatbot.sql_agents.metadata import SQL_AGENT_METADATA
 
 
@@ -20,15 +24,13 @@ def build_sql_agent_context(*, agent_name: str, today: date, customer_names: lis
             "description": TABLE_DESCRIPTIONS.get(table_name, ""),
             "primary_key": primary_key,
             "columns": {
-                column_name: {
-                    "type": column_type,
-                    "description": describe_column(
-                        table_name=table_name,
-                        column_name=column_name,
-                        primary_key=primary_key,
-                        joins=joins,
-                    ),
-                }
+                column_name: _build_column_metadata(
+                    table_name=table_name,
+                    column_name=column_name,
+                    column_type=column_type,
+                    primary_key=primary_key,
+                    joins=joins,
+                )
                 for column_name, column_type in table["columns"].items()
             },
             "joins": {
@@ -104,8 +106,9 @@ def build_sql_agent_user_prompt(
         f"{activation_section}"
         "Work in this order:\n"
         "1. Identify what the user is asking for.\n"
-        "2. Identify the exact tables and columns needed.\n"
-        "3. Decide whether you can execute now, need clarification, or must reject as unsupported.\n"
+        "2. Build an intent frame: metric, entity, filters, time window, grouping, and grain.\n"
+        "3. Identify the exact tables and columns needed.\n"
+        "4. Decide whether you can execute now, need clarification, or must reject as unsupported.\n"
         "4. If executable, build one SQL SELECT query that will be reviewed before execution.\n"
         "5. Only choose action=execute when the SQL is domain-safe and ready for review.\n"
         f"{review_section}"
@@ -120,11 +123,38 @@ def build_sql_agent_user_prompt(
         "- Use only schema-valid tables, columns, and joins.\n"
         "- Return sql_query as a single SELECT statement using canonical table names and canonical column names.\n"
         "- Do not use table aliases. Use full names like Bills.TotalAmount and Vendors.VendorName.\n"
+        "- Read the schema context first and explicitly ground metric choice in column semantics (e.g., count rows vs sum amounts/cost).\n"
+        "- If user asks for total cost/value/amount, use SUM over the relevant numeric amount column; do not return COUNT for those asks.\n"
         "- For row inspection requests, include explicit columns, deterministic ORDER BY, and TOP N when needed.\n"
         "- For aggregate requests, include the needed joins, filters, GROUP BY values, and ORDER BY when useful.\n"
         "- Keep query_plan as null. The review layer will normalize the SQL into the internal execution plan.\n"
-        "- If a required business filter is missing, choose action=clarify and ask one concise question.\n"
+        "- If the request is ambiguous, choose action=clarify and ask exactly one focused question about the single missing decision.\n"
+        "- Clarification questions must be specific to the user's wording. Avoid generic prompts like 'confirm metric, filters, and date range'.\n"
+        "- If metric wording is explicit (for example total cost/value/amount, count, average), preserve that metric in SQL.\n"
         "- If the request does not belong to your domain, choose action=unsupported.\n"
         "- If previous review feedback is present, fix those issues in this pass instead of repeating the same draft.\n"
         "- Do not output prose outside the JSON object.\n"
     )
+
+
+def _build_column_metadata(
+    *,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+    primary_key: str,
+    joins: dict[str, tuple[str, str]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "type": column_type,
+        "description": describe_column(
+            table_name=table_name,
+            column_name=column_name,
+            primary_key=primary_key,
+            joins=joins,
+        ),
+    }
+    value_hints = describe_column_value_hints(table_name=table_name, column_name=column_name)
+    if value_hints:
+        payload["value_hints"] = value_hints
+    return payload

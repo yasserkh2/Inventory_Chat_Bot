@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 
@@ -216,6 +217,17 @@ class LLMSQLAgent(SQLAgent):
         if decision.action == "clarify":
             if not (decision.clarification_question or "").strip():
                 return decision, "Action is clarify, but clarification_question is empty."
+            generic_clarify_markers = (
+                "exact metric, filters, and date range",
+                "which entity and date range should i use for the count",
+                "which amount field and date range should i use for the total",
+            )
+            clarification = (decision.clarification_question or "").strip().lower()
+            if any(marker in clarification for marker in generic_clarify_markers):
+                return (
+                    decision,
+                    "Clarification question is too generic. Ask one focused question tied to the missing ambiguity.",
+                )
             return decision, None
 
         if decision.action == "unsupported":
@@ -270,6 +282,15 @@ class LLMSQLAgent(SQLAgent):
             )
         except SQLExecutionServiceError as exc:
             return decision, f"The reviewed SQL plan is not executable yet: {exc}"
+
+        semantic_issue = self._check_intent_sql_alignment(
+            user_message=message,
+            sql_query=decision.sql_query or "",
+            query_plan=decision.query_plan.model_dump(mode="json"),
+            attempt_trace=attempt_trace,
+        )
+        if semantic_issue is not None:
+            return decision, f"The SQL query does not match the requested intent yet: {semantic_issue}"
 
         if self._looks_like_row_request(message):
             if not decision.query_plan.selects:
@@ -336,7 +357,8 @@ class LLMSQLAgent(SQLAgent):
         if not sql_query:
             return self._downgrade_execute_to_clarify(
                 finalized,
-                "I could not finalize an executable query plan from the generated output.",
+                message=message,
+                reason="I could not finalize an executable query plan from the generated output.",
             )
 
         review_result = self._review_service.review(
@@ -359,7 +381,8 @@ class LLMSQLAgent(SQLAgent):
                 return repaired
             return self._downgrade_execute_to_clarify(
                 finalized,
-                f"I could not finalize an executable query plan because: {issue}",
+                message=message,
+                reason=f"I could not finalize an executable query plan because: {issue}",
             )
 
         recovered = finalized.model_copy(
@@ -381,7 +404,8 @@ class LLMSQLAgent(SQLAgent):
         except SQLExecutionServiceError as exc:
             return self._downgrade_execute_to_clarify(
                 recovered,
-                f"I could not finalize an executable query plan because: {exc}",
+                message=message,
+                reason=f"I could not finalize an executable query plan because: {exc}",
             )
         return recovered
 
@@ -516,26 +540,44 @@ class LLMSQLAgent(SQLAgent):
                 attempt_trace["repair_feedback"] = f"Preview failed: {exc}"
                 continue
 
+            semantic_issue = self._check_intent_sql_alignment(
+                user_message=message,
+                sql_query=repaired.sql_query or "",
+                query_plan=repaired.query_plan.model_dump(mode="json"),
+                attempt_trace=attempt_trace,
+            )
+            if semantic_issue is not None:
+                prior_attempts.append(
+                    f"Repair attempt {iteration_index} failed semantic alignment: {semantic_issue}"
+                )
+                attempt_trace["repair_feedback"] = f"Semantic mismatch: {semantic_issue}"
+                continue
+
             attempt_trace["repair_feedback"] = "accepted"
             return repaired
         return None
 
-    @staticmethod
     def _downgrade_execute_to_clarify(
+        self,
         decision: SQLAgentDecision,
+        *,
+        message: str,
         reason: str,
     ) -> SQLAgentDecision:
+        clarification_question = self._generate_targeted_clarification_question(
+            user_message=message,
+            agent_name=decision.agent_name,
+            failure_reason=reason,
+        )
         return decision.model_copy(
             update={
                 "action": "clarify",
-                "clarification_question": (
-                    f"{reason} Please restate the exact metric, filters, and date range."
-                ),
+                "clarification_question": clarification_question,
             }
         )
 
-    @staticmethod
     def _build_terminal_fallback(
+        self,
         *,
         message: str,
         activation: PlannerActivation,
@@ -545,9 +587,10 @@ class LLMSQLAgent(SQLAgent):
             f"The {activation.agent_name} SQL agent could not complete a valid planning pass."
         )
         details = " ".join(prior_attempts[-2:]).strip()
-        clarification = (
-            "I could not finalize a valid SQL plan. Please restate the request with the exact metric, "
-            "filters, and date range you want."
+        clarification = self._generate_targeted_clarification_question(
+            user_message=message,
+            agent_name=activation.agent_name,
+            failure_reason="I could not finalize a valid SQL plan.",
         )
         return SQLAgentDecision(
             agent_name=activation.agent_name,
@@ -561,6 +604,88 @@ class LLMSQLAgent(SQLAgent):
             ),
             clarification_question=clarification if not details else f"{clarification} Debug context: {details}",
         )
+
+    def _generate_targeted_clarification_question(
+        self,
+        *,
+        user_message: str,
+        agent_name: str,
+        failure_reason: str,
+    ) -> str:
+        system_prompt = (
+            "You generate one targeted clarification question for an analytics user request. "
+            "Return JSON only with shape: {\"clarification_question\":\"...\"}. "
+            "The question must be specific, short, and ask only one missing decision. "
+            "Avoid generic wording like 'confirm metric, filters, and date range'."
+        )
+        user_prompt = (
+            f"Agent domain: {agent_name}\n"
+            f"Original user message: {user_message}\n"
+            f"Failure reason: {failure_reason}\n"
+            "Write one concise clarification question that helps produce the correct SQL query."
+        )
+        fallback = (
+            f"{failure_reason} Could you clarify one missing detail so I can produce the correct query?"
+        )
+        try:
+            payload, _usage = self._llm_client.generate_structured_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        except LLMProviderError:
+            return fallback
+        if not isinstance(payload, dict):
+            return fallback
+        question = str(payload.get("clarification_question", "")).strip()
+        if not question:
+            return fallback
+        if not question.endswith("?"):
+            question = f"{question}?"
+        return question
+
+    def _check_intent_sql_alignment(
+        self,
+        *,
+        user_message: str,
+        sql_query: str,
+        query_plan: dict,
+        attempt_trace: dict[str, object] | None = None,
+    ) -> str | None:
+        system_prompt = (
+            "You are an intent-to-SQL alignment reviewer. "
+            "Return JSON only with shape: "
+            "{\"aligned\":true|false,\"reason\":\"...\",\"fix_hint\":\"...\"}. "
+            "aligned=false when SQL answers a different metric/grain/filter than user intent."
+        )
+        user_prompt = (
+            f"User request:\n{user_message}\n\n"
+            f"SQL query:\n{sql_query}\n\n"
+            f"Normalized query plan:\n{json.dumps(query_plan, indent=2)}\n\n"
+            "Evaluate whether this SQL matches the user intent exactly."
+        )
+        try:
+            payload, _usage = self._llm_client.generate_structured_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        except LLMProviderError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        aligned = payload.get("aligned")
+        if aligned is True:
+            self._record_trace(attempt_trace, semantic_alignment=payload)
+            return None
+        if aligned is False:
+            reason = str(payload.get("reason", "")).strip()
+            fix_hint = str(payload.get("fix_hint", "")).strip()
+            self._record_trace(attempt_trace, semantic_alignment=payload)
+            if reason and fix_hint:
+                return f"{reason} Suggested fix: {fix_hint}"
+            if reason:
+                return reason
+            return "Intent/metric mismatch detected."
+        return None
 
     def get_last_debug_trace(self) -> dict | None:
         return self._last_debug_trace
