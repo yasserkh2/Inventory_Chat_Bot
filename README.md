@@ -15,6 +15,24 @@ Minimal inventory analytics chatbot for the interview task. The service exposes 
 
 This is intentionally not a RAG system and not a free-form text-to-SQL system. The orchestrator decides which agent should handle the request, and SQL is rendered only from vetted templates or validated dynamic query plans.
 
+## Current Status (2026-04-08)
+
+- Core architecture is implemented: orchestrator, specialists, planner, SQL review, SQL execution, API, Streamlit, and backend factory.
+- Real backend modes are implemented: `memory`, `sqlite` (recommended local), and `sqlserver`.
+- Pipeline trace diagnostics are stabilized: `orchestrator_failed` now includes `steps.orchestrator_debug`.
+- Provider connectivity failures are surfaced with cause details (for example DNS resolution errors).
+- Latest full test discovery run:
+  - total: `89`
+  - failing: `1` (`test_sales_named_customer_carryover`)
+  - skipped: `3` (SQL Server integration tests, env-gated)
+
+Detailed progress logs:
+
+- [WORK_DONE_LOG.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/WORK_DONE_LOG.md)
+- [DECISIONS_LOG.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/DECISIONS_LOG.md)
+- [ORCHESTRATOR_EXPLANATION.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/ORCHESTRATOR_EXPLANATION.md)
+- [SQL_BACKEND_IMPLEMENTATION_SUMMARY.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/SQL_BACKEND_IMPLEMENTATION_SUMMARY.md)
+
 ## Supported Intents
 
 - Total active asset count
@@ -248,8 +266,14 @@ Example trace command:
 
 ```bash
 source .venv/bin/activate
-python -m inventory_chatbot.pipeline_trace_cli "show me any first 5 rows of any table" --pretty
+python -m inventory_chatbot.pipeline_trace_cli "Show total invoice amount by vendor for last quarter" --pretty
 ```
+
+Expected failure diagnostics when provider networking is unavailable:
+
+- `path: orchestrator_failed`
+- `steps.orchestrator_debug.status: provider_error`
+- `steps.orchestrator_debug.error` includes connection/DNS cause text
 
 Detailed implementation log and architectural decisions are tracked in [DECISIONS_LOG.md](/media/yasser/New Volume/yasser/New_journey/Inventory_Chat_Bot/DECISIONS_LOG.md).
 
