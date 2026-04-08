@@ -24,6 +24,7 @@ from inventory_chatbot.query_makers.prompts import (
 )
 from inventory_chatbot.router.registry import SpecialistRegistry
 from inventory_chatbot.services.response_formatter import build_response
+from inventory_chatbot.services.final_conversation_agent import FinalConversationAgent
 from inventory_chatbot.services.session_store import SessionStore
 from inventory_chatbot.sql_agents.models import SQLAgentDecision
 from inventory_chatbot.sql_execution.models import SQLExecutionRequest
@@ -44,6 +45,7 @@ class RouterService:
         query_maker: QueryMaker | None = None,
         handoff_service: OrchestratorHandoffService | None = None,
         customer_names: list[str] | None = None,
+        final_conversation_agent: FinalConversationAgent | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -57,6 +59,7 @@ class RouterService:
         self._query_maker = query_maker
         self._handoff_service = handoff_service or OrchestratorHandoffService()
         self._customer_names = customer_names or []
+        self._final_conversation_agent = final_conversation_agent or FinalConversationAgent()
 
     def handle_chat(self, request: ChatRequest) -> ChatResponse:
         started_at = time.perf_counter()
@@ -412,8 +415,16 @@ class RouterService:
             status = "error"
 
         latency_ms = self._latency_ms(started_at)
+        polished_answer = self._final_conversation_agent.compose(
+            user_message=request.message,
+            raw_answer=answer,
+            reply_status=reply.status,
+            response_status=status,
+            sql_query=reply.sql_query,
+            result_preview=reply.computed_result.answer_context if reply.computed_result else {},
+        )
         response = build_response(
-            answer=answer,
+            answer=polished_answer,
             sql_query=reply.sql_query,
             result_preview=reply.computed_result.answer_context if reply.computed_result else {},
             usage=usage,
@@ -426,7 +437,7 @@ class RouterService:
             SessionTurn(
                 user_message=request.message,
                 status=status,
-                assistant_message=answer,
+                assistant_message=polished_answer,
                 sql_query=reply.sql_query,
                 specialist_name=reply.agent_name,
                 intent_id=reply.intent_id,

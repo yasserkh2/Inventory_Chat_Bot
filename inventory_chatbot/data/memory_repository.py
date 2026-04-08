@@ -23,6 +23,9 @@ class InMemoryRepository(
     def __init__(self, seed_data: dict[str, list[dict[str, Any]]] | None = None) -> None:
         self._data = seed_data or build_seed_data()
 
+    def export_seed_data(self) -> dict[str, list[dict[str, Any]]]:
+        return deepcopy(self._data)
+
     def list_assets(self) -> list[dict[str, Any]]:
         return deepcopy(self._data["assets"])
 
@@ -50,4 +53,3 @@ class InMemoryRepository(
             if customer["customer_name"].lower() == normalized:
                 return deepcopy(customer)
         return None
-

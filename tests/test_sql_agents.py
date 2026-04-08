@@ -87,10 +87,72 @@ class ReviewRejectedSQLAgentLLMClient(FakeLLMClient):
                     ],
                     "query_strategy": "Group billing totals by vendor for last quarter.",
                     "sql_query": (
-                        "SELECT Vendors.VendorName, SUM(Bills.TotalAmount) AS TotalBilled "
-                        "FROM Bills b "
-                        "JOIN Vendors ON Bills.VendorId = Vendors.VendorId "
+                        "SELECT Vendors.VendorName, SUM(Bills.UnknownAmount) AS TotalBilled "
+                        "FROM Bills "
+                        "INNER JOIN Vendors ON Bills.VendorId = Vendors.VendorId "
                         "GROUP BY Vendors.VendorName"
+                    ),
+                    "query_plan": None,
+                },
+                TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+        return super().generate_structured_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+
+class RepairingSQLAgentLLMClient(FakeLLMClient):
+    def __init__(self) -> None:
+        self.billing_calls = 0
+
+    def generate_structured_json(
+        self, *, system_prompt: str, user_prompt: str
+    ) -> tuple[dict | None, TokenUsage]:
+        if "assets query-maker agent" in system_prompt.lower():
+            self.billing_calls += 1
+            if self.billing_calls == 1:
+                return (
+                    {
+                        "agent_name": "assets",
+                        "action": "execute",
+                        "user_need": "How many assets were purchased this year?",
+                        "analysis_summary": "Attempting to count purchases this year.",
+                        "required_data": [
+                            self._required_data(
+                                "Assets",
+                                ["AssetId", "PurchaseDate"],
+                                "Need purchase date to filter by year.",
+                            ),
+                        ],
+                        "query_strategy": "Count assets for the year.",
+                        "sql_query": (
+                            "SELECT COUNT(*) AS AssetCount "
+                            "FROM Assets "
+                            "WHERE PurchaseDate BETWEEN '2026-01-01' AND '2026-12-31';"
+                        ),
+                        "query_plan": None,
+                    },
+                    TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                )
+            return (
+                {
+                    "agent_name": "assets",
+                    "action": "execute",
+                    "user_need": "How many assets were purchased this year?",
+                    "analysis_summary": "Repair the failed query with fully-qualified column names.",
+                    "required_data": [
+                        self._required_data(
+                            "Assets",
+                            ["AssetId", "PurchaseDate"],
+                            "Need purchase date to filter by year.",
+                        ),
+                    ],
+                    "query_strategy": "Count assets for the year using qualified columns.",
+                    "sql_query": (
+                        "SELECT COUNT(*) AS AssetCount "
+                        "FROM Assets "
+                        "WHERE Assets.PurchaseDate BETWEEN '2026-01-01' AND '2026-12-31';"
                     ),
                     "query_plan": None,
                 },
@@ -279,6 +341,34 @@ class SQLAgentTests(unittest.TestCase):
             "could not finalize an executable query plan",
             (decision.clarification_question or "").lower(),
         )
+
+    def test_sql_agent_uses_repair_loop_after_review_failure(self) -> None:
+        agent = LLMSQLAgent(
+            llm_client=RepairingSQLAgentLLMClient(),
+            today=FIXED_TODAY,
+            customer_names=["Acme Corp", "Bright Retail", "Northwind LLC"],
+            execution_service=self.execution_service,
+            max_iterations=1,
+            repair_iterations=2,
+        )
+        decision = agent.decide(
+            "How many assets were purchased this year?",
+            SessionState(session_id="sql-agent-repair"),
+            PlannerActivation(
+                agent_name="assets",
+                handoff_summary="Count purchased assets this year.",
+                context={},
+            ),
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, "execute")
+        self.assertIsNotNone(decision.query_plan)
+        self.assertIn("Assets.PurchaseDate", decision.sql_query or "")
+        self.assertEqual(decision.query_plan.base_table, "Assets")
+        debug_trace = agent.get_last_debug_trace()
+        self.assertIsNotNone(debug_trace)
+        self.assertIn("repair_attempts", debug_trace)
+        self.assertGreaterEqual(len(debug_trace["repair_attempts"]), 1)
 
 
 if __name__ == "__main__":

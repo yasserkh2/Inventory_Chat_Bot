@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from inventory_chatbot.llm.base import LLMClient, LLMProviderError
 from inventory_chatbot.models.domain import SessionState
 from inventory_chatbot.orchestrator.base import Orchestrator
-from inventory_chatbot.orchestrator.models import OrchestratorDecision
+from inventory_chatbot.orchestrator.models import OrchestratorDecision, RequiredDataPoint
 from inventory_chatbot.orchestrator.prompts import (
     ORCHESTRATOR_SYSTEM_PROMPT,
     build_orchestrator_context,
@@ -18,6 +18,43 @@ from inventory_chatbot.orchestrator.prompts import (
 
 class LLMOrchestrator(Orchestrator):
     _DOMAIN_AGENTS = {"assets", "billing", "procurement", "sales"}
+    _DATA_REQUEST_HINTS = (
+        "how many",
+        "count",
+        "sum",
+        "total",
+        "average",
+        "avg",
+        "rows",
+        "row",
+        "records",
+        "list",
+        "show",
+        "give",
+        "top",
+        "latest",
+        "breakdown",
+        "group by",
+        "what",
+        "which",
+    )
+    _DOMAIN_ANCHORS = (
+        "asset",
+        "site",
+        "location",
+        "item",
+        "vendor",
+        "bill",
+        "invoice",
+        "currency",
+        "purchase order",
+        "po ",
+        "customer",
+        "sales order",
+        "amount",
+        "status",
+        "date",
+    )
 
     def __init__(
         self,
@@ -177,6 +214,11 @@ class LLMOrchestrator(Orchestrator):
             return None
 
         if decision.agent in self._DOMAIN_AGENTS:
+            if not decision.clarification_needed and self._looks_like_vague_data_request(message):
+                return (
+                    "This looks like a vague data request. Set clarification_needed=true and ask one concise "
+                    "question to confirm the exact metric, entity, or date/filter scope."
+                )
             missing_parts = []
             if not decision.user_need.strip():
                 missing_parts.append("summarize the user need")
@@ -227,9 +269,19 @@ class LLMOrchestrator(Orchestrator):
             updates["clarification_question"] = (
                 "Which exact metric, filter, or date range should I use for this request?"
             )
-        if not updates:
-            return decision
-        return decision.model_copy(update=updates)
+        finalized = decision if not updates else decision.model_copy(update=updates)
+        finalized = self._translate_common_business_terms(message, finalized)
+        if finalized.agent in self._DOMAIN_AGENTS and finalized.clarification_needed is False:
+            if self._looks_like_vague_data_request(message):
+                finalized = finalized.model_copy(
+                    update={
+                        "clarification_needed": True,
+                        "clarification_question": (
+                            "Do you want a list of distinct values, a count, or an amount, and for which date range?"
+                        ),
+                    }
+                )
+        return finalized
 
     @classmethod
     def _default_analysis_summary(cls, agent: str) -> str:
@@ -258,42 +310,13 @@ class LLMOrchestrator(Orchestrator):
     @staticmethod
     def _looks_like_data_request(message: str) -> bool:
         normalized = re.sub(r"\s+", " ", message.lower())
-        phrases = (
-            "how many",
-            "count",
-            "sum",
-            "total",
-            "average",
-            "avg",
-            "rows",
-            "row",
-            "records",
-            "list",
-            "show",
-            "filter",
-            "breakdown",
-            "group by",
-            "latest",
-            "top",
-        )
+        phrases = LLMOrchestrator._DATA_REQUEST_HINTS
         return any(phrase in normalized for phrase in phrases)
 
     @staticmethod
     def _looks_like_supported_domain_request(message: str) -> bool:
         normalized = re.sub(r"\s+", " ", message.lower())
-        keywords = (
-            "asset",
-            "site",
-            "location",
-            "item",
-            "vendor",
-            "bill",
-            "invoice",
-            "purchase order",
-            "po ",
-            "customer",
-            "sales order",
-        )
+        keywords = LLMOrchestrator._DOMAIN_ANCHORS
         return any(keyword in normalized for keyword in keywords)
 
     @staticmethod
@@ -312,3 +335,53 @@ class LLMOrchestrator(Orchestrator):
             "relationships",
         )
         return any(term in normalized for term in schema_terms)
+
+    @classmethod
+    def _looks_like_vague_data_request(cls, message: str) -> bool:
+        normalized = re.sub(r"\s+", " ", message.lower()).strip()
+        if not cls._looks_like_data_request(normalized):
+            return False
+        has_domain_anchor = any(keyword in normalized for keyword in cls._DOMAIN_ANCHORS)
+        if has_domain_anchor:
+            return False
+        token_count = len([token for token in normalized.split(" ") if token])
+        return token_count <= 8
+
+    @staticmethod
+    def _translate_common_business_terms(
+        message: str, decision: OrchestratorDecision
+    ) -> OrchestratorDecision:
+        if decision.agent != "billing":
+            return decision
+
+        normalized = re.sub(r"\s+", " ", message.lower()).strip()
+        if "currency" not in normalized:
+            return decision
+
+        required_data = list(decision.required_data)
+        has_bills_currency = any(
+            item.table == "Bills" and "Currency" in item.columns for item in required_data
+        )
+        if not has_bills_currency:
+            required_data.append(
+                RequiredDataPoint(
+                    table="Bills",
+                    columns=["Currency"],
+                    reason="Currency requests map to the Bills.Currency column.",
+                )
+            )
+
+        handoff = (decision.handoff_instructions or "").strip()
+        if "Bills.Currency" not in handoff:
+            handoff = (
+                f"{handoff} "
+                "Translate the request to Bills.Currency (column), not a Currency table. "
+                "Prefer DISTINCT Bills.Currency ordered ascending."
+            ).strip()
+
+        return decision.model_copy(
+            update={
+                "required_data": required_data,
+                "handoff_instructions": handoff,
+            }
+        )

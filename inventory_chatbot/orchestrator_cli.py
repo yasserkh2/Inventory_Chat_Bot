@@ -6,7 +6,6 @@ import sys
 from datetime import date
 
 from inventory_chatbot.config import AppConfig, ConfigurationError
-from inventory_chatbot.data.memory_repository import InMemoryRepository
 from inventory_chatbot.llm.factory import build_llm_client
 from inventory_chatbot.models.domain import SessionState
 from inventory_chatbot.orchestrator.llm_based import LLMOrchestrator
@@ -15,6 +14,7 @@ from inventory_chatbot.orchestrator.prompts import (
     build_orchestrator_context,
     build_orchestrator_user_prompt,
 )
+from inventory_chatbot.runtime.backend_factory import build_data_backend_runtime
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,7 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    repository = InMemoryRepository()
+
+    try:
+        config = AppConfig.from_env()
+        config.validate_provider_credentials()
+        runtime = build_data_backend_runtime(config)
+    except (ConfigurationError, RuntimeError, ValueError) as exc:
+        print(f"Configuration/runtime error: {exc}", file=sys.stderr)
+        return 1
+
+    repository = runtime.repository
     customer_names = [customer["customer_name"] for customer in repository.list_customers()]
     resolved_today = date.today()
     context = build_orchestrator_context(
@@ -85,13 +94,6 @@ def main() -> int:
         )
         if args.prompt_only:
             return 0
-
-    try:
-        config = AppConfig.from_env()
-        config.validate_provider_credentials()
-    except ConfigurationError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        return 1
 
     llm_client = build_llm_client(config)
     orchestrator = LLMOrchestrator(

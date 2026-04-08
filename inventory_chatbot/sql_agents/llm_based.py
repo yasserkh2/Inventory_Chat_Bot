@@ -35,6 +35,7 @@ class LLMSQLAgent(SQLAgent):
         execution_service: SQLExecutionService,
         review_service: SQLReviewService | None = None,
         max_iterations: int = 3,
+        repair_iterations: int = 2,
     ) -> None:
         self._llm_client = llm_client
         self._today = today
@@ -43,6 +44,7 @@ class LLMSQLAgent(SQLAgent):
         self._review_service = review_service or SQLReviewService()
         self._compiler = SQLCompiler()
         self._max_iterations = max(1, max_iterations)
+        self._repair_iterations = max(1, repair_iterations)
         self._last_debug_trace: dict | None = None
 
     def decide(
@@ -347,6 +349,14 @@ class LLMSQLAgent(SQLAgent):
         )
         if not review_result.approved or review_result.normalized_query_plan is None:
             issue = review_result.issues[0] if review_result.issues else "SQL review rejected the query."
+            repaired = self._attempt_llm_repair_after_failure(
+                message=message,
+                activation=activation,
+                current_decision=finalized,
+                initial_issue=issue,
+            )
+            if repaired is not None:
+                return repaired
             return self._downgrade_execute_to_clarify(
                 finalized,
                 f"I could not finalize an executable query plan because: {issue}",
@@ -374,6 +384,141 @@ class LLMSQLAgent(SQLAgent):
                 f"I could not finalize an executable query plan because: {exc}",
             )
         return recovered
+
+    def _attempt_llm_repair_after_failure(
+        self,
+        *,
+        message: str,
+        activation: PlannerActivation,
+        current_decision: SQLAgentDecision,
+        initial_issue: str,
+    ) -> SQLAgentDecision | None:
+        if self._last_debug_trace is not None:
+            self._last_debug_trace.setdefault("repair_attempts", [])
+
+        schema_context = build_sql_agent_context(
+            agent_name=current_decision.agent_name,
+            today=self._today,
+            customer_names=self._customer_names,
+        )
+        session_history = "No prior conversation."
+        prior_attempts = [
+            (
+                "Repair request: the previous SQL draft failed review with issue: "
+                f"{initial_issue}. Return a corrected execute decision with a single valid SELECT query."
+            )
+        ]
+
+        for iteration_index in range(1, self._repair_iterations + 1):
+            prompt = build_sql_agent_user_prompt(
+                agent_name=current_decision.agent_name,
+                user_message=message,
+                schema_context=schema_context,
+                session_history=session_history,
+                orchestrator_handoff=activation.handoff_summary,
+                activation_context=activation.context,
+                iteration_index=iteration_index,
+                max_iterations=self._repair_iterations,
+                prior_attempts=prior_attempts,
+            )
+            attempt_trace: dict[str, object] = {
+                "iteration": iteration_index,
+                "prompt": prompt,
+                "source": "repair_after_failure",
+            }
+            if self._last_debug_trace is not None:
+                self._last_debug_trace["repair_attempts"].append(attempt_trace)
+
+            try:
+                payload, _usage = self._llm_client.generate_structured_json(
+                    system_prompt=build_sql_agent_system_prompt(current_decision.agent_name),
+                    user_prompt=prompt,
+                )
+            except LLMProviderError:
+                attempt_trace["provider_error"] = True
+                continue
+
+            attempt_trace["raw_payload"] = payload
+            decision = self._coerce_decision(
+                payload=payload,
+                agent_name=current_decision.agent_name,
+                message=message,
+                activation=activation,
+                attempt_trace=attempt_trace,
+            )
+            if decision is None:
+                prior_attempts.append(
+                    f"Repair attempt {iteration_index} failed to return a valid decision shape."
+                )
+                continue
+
+            if decision.action != "execute":
+                attempt_trace["repair_feedback"] = (
+                    f"Repair attempt returned action={decision.action}, expected execute."
+                )
+                prior_attempts.append(
+                    f"Repair attempt {iteration_index} returned action={decision.action}. "
+                    "Return action=execute with corrected SQL."
+                )
+                continue
+
+            candidate_sql = (decision.sql_query or "").strip()
+            if not candidate_sql and decision.query_plan is not None:
+                candidate_sql = self._compiler.compile(decision.query_plan)
+                decision = decision.model_copy(update={"sql_query": candidate_sql})
+            if not candidate_sql:
+                attempt_trace["repair_feedback"] = "Missing sql_query."
+                prior_attempts.append(
+                    f"Repair attempt {iteration_index} returned execute without sql_query."
+                )
+                continue
+
+            review_result = self._review_service.review(
+                SQLReviewRequest(
+                    user_message=message,
+                    sql_query=candidate_sql,
+                    source_agent=decision.agent_name,
+                    allowed_tables=list(SQL_AGENT_METADATA[decision.agent_name]["tables"]),
+                )
+            )
+            attempt_trace["sql_review"] = review_result.model_dump(mode="json")
+            if not review_result.approved or review_result.normalized_query_plan is None:
+                issue = (
+                    review_result.issues[0]
+                    if review_result.issues
+                    else "SQL review rejected the repaired query."
+                )
+                prior_attempts.append(
+                    f"Repair attempt {iteration_index} failed review: {issue}"
+                )
+                continue
+
+            repaired = decision.model_copy(
+                update={
+                    "sql_query": review_result.reviewed_sql,
+                    "query_plan": review_result.normalized_query_plan,
+                }
+            )
+            try:
+                self._execution_service.preview_sql(
+                    SQLExecutionRequest(
+                        user_message=message,
+                        query_plan=repaired.query_plan,
+                        sql_query=repaired.sql_query,
+                        source_agent=repaired.agent_name,
+                        allowed_tables=list(SQL_AGENT_METADATA[repaired.agent_name]["tables"]),
+                    )
+                )
+            except SQLExecutionServiceError as exc:
+                prior_attempts.append(
+                    f"Repair attempt {iteration_index} preview failed: {exc}"
+                )
+                attempt_trace["repair_feedback"] = f"Preview failed: {exc}"
+                continue
+
+            attempt_trace["repair_feedback"] = "accepted"
+            return repaired
+        return None
 
     @staticmethod
     def _downgrade_execute_to_clarify(

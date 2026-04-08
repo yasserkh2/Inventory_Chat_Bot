@@ -1,14 +1,16 @@
 # Inventory Chatbot
 
-Minimal inventory analytics chatbot for the interview task. The service exposes a REST API, keeps in-memory session context, routes questions through deterministic domain specialists, and returns both a natural-language answer and the exact SQL Server query that would run in production.
+Minimal inventory analytics chatbot for the interview task. The service exposes a REST API, keeps in-memory session context, routes questions through deterministic domain specialists, and returns both a natural-language answer and the exact SQL query used for execution.
 
 ## Architecture
 
 - `RouterService` handles request validation, session-aware dispatch, specialist execution, dynamic SQL execution, and final answer phrasing.
 - `inventory_chatbot/orchestrator` is a standalone package responsible for LLM-based routing, schema-aware analysis, and agent handoff preparation.
+- `inventory_chatbot/sql_backend` is a standalone package that owns SQL backend connection lifecycle, repository reads, validated SQL execution, row mapping, and startup health checks.
+- `inventory_chatbot/runtime/backend_factory.py` is the single wiring entrypoint that builds memory-mode, SQLite-mode, or SQL Server-mode dependencies for API, CLI, and Streamlit.
 - Domain specialists own supported intents, query plans, SQL templates, and deterministic calculations.
 - `LLMQueryMaker` focuses only on query planning for the chosen domain instead of also deciding routing.
-- `InMemoryRepository` provides demo data for v1, while the shown SQL is the production-targeted SQL Server query.
+- `InMemoryRepository` remains available for tests/local fallback mode, while SQLite and SQL Server modes execute reviewed SQL against a real database.
 - OpenAI and Azure OpenAI providers are supported through the official OpenAI Python SDK clients.
 
 This is intentionally not a RAG system and not a free-form text-to-SQL system. The orchestrator decides which agent should handle the request, and SQL is rendered only from vetted templates or validated dynamic query plans.
@@ -28,7 +30,8 @@ This is intentionally not a RAG system and not a free-form text-to-SQL system. T
 ## Requirements
 
 - Python 3.12+
-- `pydantic`
+- SQLite (built into Python via stdlib `sqlite3`) for local mode
+- ODBC Driver 18 for SQL Server (only required in SQL Server mode)
 
 Install locally:
 
@@ -69,6 +72,59 @@ export MODEL_NAME="gpt-4.1-mini"
 ```
 
 You can also edit `.env` directly instead of exporting variables for each run.
+
+SQL backend options:
+
+```bash
+export DATA_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=inventory_chatbot.sqlite3
+```
+
+SQL Server alternative:
+
+```bash
+export DATA_BACKEND=sqlserver
+export SQLSERVER_HOST=127.0.0.1
+export SQLSERVER_PORT=1433
+export SQLSERVER_DATABASE=InventoryChatbot
+export SQLSERVER_USER=sa
+export SQLSERVER_PASSWORD='YourStrong!Passw0rd'
+export SQLSERVER_DRIVER='ODBC Driver 18 for SQL Server'
+export SQLSERVER_ENCRYPT=false
+export SQLSERVER_TRUST_SERVER_CERTIFICATE=true
+export SQLSERVER_CONNECTION_TIMEOUT_SECONDS=30
+```
+
+When `DATA_BACKEND` is `sqlite` or `sqlserver`, startup is fail-fast: the app validates backend config and checks DB connectivity (`SELECT 1`) before serving requests.
+
+## SQLite Quick Start (Recommended)
+
+```bash
+source .venv/bin/activate
+export DATA_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=inventory_chatbot.sqlite3
+python -m inventory_chatbot.sql_backend.db_init
+python -m streamlit run inventory_chatbot/streamlit_app.py
+```
+
+This is the easiest local setup and does not require Docker or ODBC drivers.
+
+## SQL Server Bootstrap
+
+Start SQL Server (Docker):
+
+```bash
+docker compose -f docker-compose.sqlserver.yml up -d
+```
+
+Initialize schema + seed data into SQL Server:
+
+```bash
+source .venv/bin/activate
+DATA_BACKEND=sqlserver python -m inventory_chatbot.sql_backend.db_init
+```
+
+This creates all tables from the app schema catalog and loads the same seed dataset used in memory mode.
 
 ## Run
 
@@ -112,7 +168,7 @@ You can also run the chatbot as a Streamlit app:
 
 ```bash
 source .venv/bin/activate
-streamlit run inventory_chatbot/streamlit_app.py
+python -m streamlit run inventory_chatbot/streamlit_app.py
 ```
 
 This launches a chat-style UI that talks to the same router service directly and shows SQL for query-backed answers.
@@ -123,6 +179,23 @@ Streamlit UI notes:
 - Renders SQL, result preview, and metadata per assistant reply.
 - Safely serializes `date`/`datetime` values in previews to avoid UI crashes.
 - Includes sidebar toggles to show/hide result preview and metadata.
+
+## Tests
+
+Run the unit/service tests:
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Run Docker-backed SQL Server integration tests (optional):
+
+```bash
+source .venv/bin/activate
+export RUN_SQLSERVER_INTEGRATION=1
+python -m unittest tests.test_sqlserver_integration -v
+```
 
 ## API Example
 
@@ -154,21 +227,6 @@ Example response shape:
 }
 ```
 
-## Tests
-
-```bash
-source .venv/bin/activate
-python -m unittest discover -s tests -v
-```
-
-Orchestrator-only checks:
-
-```bash
-source .venv/bin/activate
-python -m unittest tests.test_orchestrator -v
-python -m inventory_chatbot.orchestrator_cli "How many assets by site?" --prompt-only
-```
-
 ## Recent Stabilization Updates (2026-04-08)
 
 The latest debugging and hardening pass focused on pipeline trace reliability, SQL handoff safety, and clearer failure diagnostics.
@@ -178,6 +236,8 @@ The latest debugging and hardening pass focused on pipeline trace reliability, S
 3. Prevented SQL handoff crashes when SQL-agent output is incomplete.
 4. Made pipeline trace JSON serialization robust for `date`/`datetime` values.
 5. Added regression tests for all of the above.
+6. Added SQLite real-backend mode for easier local execution without ODBC.
+7. Extended SQL review/parser support for SQLite `LIMIT` syntax.
 
 New behavior in trace diagnostics:
 
@@ -195,9 +255,10 @@ Detailed implementation log and architectural decisions are tracked in [DECISION
 
 ## Notes And Tradeoffs
 
-- Demo answers are computed from embedded seed data.
-- The returned SQL is the exact SQL Server query that would run in a production-backed version.
+- SQLite mode executes reviewed SQL against a real local DB and is recommended for local development.
+- SQL Server mode remains available for interview reproducibility with Docker.
+- Memory mode is still available for deterministic tests and local lightweight runs.
 - Provider failures return a controlled API error.
 - The orchestrator is now separated from the router for cleaner responsibilities and easier prompt iteration.
 - The orchestrator loop is bounded to keep behavior predictable while still allowing limited self-correction.
-- v1 deliberately excludes live SQL Server execution, persistent storage, authentication, and broad natural-language coverage beyond the supported intents.
+- Authentication and broad unrestricted text-to-SQL are intentionally out of scope for this interview implementation.

@@ -81,7 +81,17 @@ def _parse_int(name: str, raw_value: str) -> int:
         raise ConfigurationError(f"{name} must be an integer") from exc
 
 
+def _parse_bool(name: str, raw_value: str) -> bool:
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be a boolean (true/false)")
+
+
 class AppConfig(BaseModel):
+    data_backend: Literal["memory", "sqlserver", "sqlite"] = "memory"
     provider: Literal["openai", "azure"] = "azure"
     openai_api_key: str | None = None
     azure_openai_endpoint: str | None = None
@@ -92,6 +102,16 @@ class AppConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
     request_timeout_seconds: int = Field(default=20, ge=1, le=120)
+    sqlserver_host: str | None = None
+    sqlserver_port: int = 1433
+    sqlserver_database: str | None = None
+    sqlserver_user: str | None = None
+    sqlserver_password: str | None = None
+    sqlserver_driver: str = "ODBC Driver 18 for SQL Server"
+    sqlserver_encrypt: bool = True
+    sqlserver_trust_server_certificate: bool = True
+    sqlserver_connection_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    sqlite_database_path: str = "inventory_chatbot.sqlite3"
 
     @classmethod
     def from_env(
@@ -125,8 +145,33 @@ class AppConfig(BaseModel):
             )
             or "20"
         )
+        raw_sqlserver_port = _lookup(
+            source,
+            "SQLSERVER_PORT",
+            "sqlserver_port",
+            "1433",
+        ) or "1433"
+        raw_sqlserver_encrypt = _lookup(
+            source,
+            "SQLSERVER_ENCRYPT",
+            "sqlserver_encrypt",
+            "true",
+        ) or "true"
+        raw_sqlserver_trust_server_certificate = _lookup(
+            source,
+            "SQLSERVER_TRUST_SERVER_CERTIFICATE",
+            "sqlserver_trust_server_certificate",
+            "true",
+        ) or "true"
+        raw_sqlserver_connection_timeout = _lookup(
+            source,
+            "SQLSERVER_CONNECTION_TIMEOUT_SECONDS",
+            "sqlserver_connection_timeout_seconds",
+            "30",
+        ) or "30"
 
         return cls(
+            data_backend=_lookup(source, "DATA_BACKEND", "data_backend", "memory"),
             provider=_lookup(source, "PROVIDER", "provider", "azure"),
             openai_api_key=_lookup(source, "OPENAI_API_KEY", "openai_api_key"),
             azure_openai_endpoint=_lookup(
@@ -150,6 +195,36 @@ class AppConfig(BaseModel):
             request_timeout_seconds=_parse_int(
                 "REQUEST_TIMEOUT_SECONDS", raw_timeout
             ),
+            sqlserver_host=_lookup(source, "SQLSERVER_HOST", "sqlserver_host"),
+            sqlserver_port=_parse_int("SQLSERVER_PORT", raw_sqlserver_port),
+            sqlserver_database=_lookup(source, "SQLSERVER_DATABASE", "sqlserver_database"),
+            sqlserver_user=_lookup(source, "SQLSERVER_USER", "sqlserver_user"),
+            sqlserver_password=_lookup(source, "SQLSERVER_PASSWORD", "sqlserver_password"),
+            sqlserver_driver=_lookup(
+                source,
+                "SQLSERVER_DRIVER",
+                "sqlserver_driver",
+                "ODBC Driver 18 for SQL Server",
+            ),
+            sqlserver_encrypt=_parse_bool(
+                "SQLSERVER_ENCRYPT",
+                raw_sqlserver_encrypt,
+            ),
+            sqlserver_trust_server_certificate=_parse_bool(
+                "SQLSERVER_TRUST_SERVER_CERTIFICATE",
+                raw_sqlserver_trust_server_certificate,
+            ),
+            sqlserver_connection_timeout_seconds=_parse_int(
+                "SQLSERVER_CONNECTION_TIMEOUT_SECONDS",
+                raw_sqlserver_connection_timeout,
+            ),
+            sqlite_database_path=_lookup(
+                source,
+                "SQLITE_DATABASE_PATH",
+                "sqlite_database_path",
+                "inventory_chatbot.sqlite3",
+            )
+            or "inventory_chatbot.sqlite3",
         )
 
     def validate_provider_credentials(self) -> None:
@@ -170,4 +245,26 @@ class AppConfig(BaseModel):
         if missing:
             raise ConfigurationError(
                 "Missing Azure OpenAI configuration: " + ", ".join(missing)
+            )
+
+    def validate_sql_backend_configuration(self) -> None:
+        if self.data_backend == "sqlserver":
+            missing = []
+            if not self.sqlserver_host:
+                missing.append("SQLSERVER_HOST")
+            if not self.sqlserver_database:
+                missing.append("SQLSERVER_DATABASE")
+            if not self.sqlserver_user:
+                missing.append("SQLSERVER_USER")
+            if not self.sqlserver_password:
+                missing.append("SQLSERVER_PASSWORD")
+            if missing:
+                raise ConfigurationError(
+                    "Missing SQL Server configuration: " + ", ".join(missing)
+                )
+            return
+
+        if self.data_backend == "sqlite" and not self.sqlite_database_path.strip():
+            raise ConfigurationError(
+                "SQLITE_DATABASE_PATH is required when DATA_BACKEND=sqlite"
             )

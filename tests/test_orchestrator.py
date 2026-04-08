@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from inventory_chatbot.config import AppConfig
 from inventory_chatbot.pipeline_trace_cli import _print_trace, main as pipeline_trace_main
+from inventory_chatbot.models.api import TokenUsage
 from inventory_chatbot.models.domain import SessionState
 from inventory_chatbot.orchestrator.llm_based import LLMOrchestrator
 from inventory_chatbot.orchestrator.prompts import (
@@ -17,6 +18,53 @@ from tests.helpers import (
     LoopingOrchestratorLLMClient,
     StructuredFailingLLMClient,
 )
+
+
+class OrchestratorTranslationLLMClient(FakeLLMClient):
+    def generate_structured_json(
+        self, *, system_prompt: str, user_prompt: str
+    ) -> tuple[dict | None, TokenUsage]:
+        if "orchestrator agent" not in system_prompt.lower():
+            return super().generate_structured_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        question = self._extract_user_question(user_prompt).lower().strip()
+        if "currency" in question:
+            return (
+                self._decision(
+                    agent="billing",
+                    user_need="Find the currencies in billing data.",
+                    analysis_summary="This belongs to billing.",
+                    required_data=[
+                        self._required_data(
+                            "Bills",
+                            ["BillId", "BillDate"],
+                            "Bills contains the billing facts.",
+                        )
+                    ],
+                    handoff_instructions="Return the requested billing answer.",
+                ),
+                TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+        if question == "show me data":
+            return (
+                self._decision(
+                    agent="assets",
+                    user_need="Show data.",
+                    analysis_summary="Could be assets.",
+                    required_data=[
+                        self._required_data(
+                            "Assets",
+                            ["AssetId"],
+                            "Asset rows are available.",
+                        )
+                    ],
+                    handoff_instructions="Try to show rows.",
+                ),
+                TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+        return super().generate_structured_json(system_prompt=system_prompt, user_prompt=user_prompt)
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -189,6 +237,40 @@ class OrchestratorTests(unittest.TestCase):
         rendered = "".join(call.args[0] for call in stdout_write.call_args_list)
         self.assertEqual(exit_code, 0)
         self.assertIn('"BillDate": "2026-04-07"', rendered)
+
+    def test_orchestrator_translates_currency_to_bills_currency_handoff(self) -> None:
+        orchestrator = LLMOrchestrator(
+            llm_client=OrchestratorTranslationLLMClient(),
+            today=FIXED_TODAY,
+            customer_names=["Acme Corp", "Bright Retail", "Northwind LLC"],
+            max_iterations=1,
+        )
+        decision = orchestrator.decide(
+            "what currency do we have",
+            SessionState(session_id="currency-translation"),
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.agent, "billing")
+        self.assertTrue(
+            any(item.table == "Bills" and "Currency" in item.columns for item in decision.required_data)
+        )
+        self.assertIn("Bills.Currency", decision.handoff_instructions)
+        self.assertIn("not a Currency table", decision.handoff_instructions)
+
+    def test_orchestrator_marks_vague_data_request_for_clarification(self) -> None:
+        orchestrator = LLMOrchestrator(
+            llm_client=OrchestratorTranslationLLMClient(),
+            today=FIXED_TODAY,
+            customer_names=["Acme Corp", "Bright Retail", "Northwind LLC"],
+            max_iterations=1,
+        )
+        decision = orchestrator.decide(
+            "show me data",
+            SessionState(session_id="vague-request"),
+        )
+        self.assertIsNotNone(decision)
+        self.assertTrue(decision.clarification_needed)
+        self.assertIn("date range", (decision.clarification_question or "").lower())
 
 
 if __name__ == "__main__":

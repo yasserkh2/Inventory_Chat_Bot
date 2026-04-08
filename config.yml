@@ -1,6 +1,7 @@
 # Base application defaults.
 # Precedence: config.yml < .env < real environment variables
 
+data_backend: sqlite
 provider: azure
 model_name: gpt-4.1-mini
 host: 0.0.0.0
@@ -13,3 +14,13 @@ azure_openai_api_key: ""
 azure_openai_deployment: ""
 openai_api_key: ""
 
+sqlserver_host: ""
+sqlserver_port: 1433
+sqlserver_database: ""
+sqlserver_user: ""
+sqlserver_password: ""
+sqlserver_driver: "ODBC Driver 18 for SQL Server"
+sqlserver_encrypt: true
+sqlserver_trust_server_certificate: true
+sqlserver_connection_timeout_seconds: 30
+sqlite_database_path: "inventory_chatbot.sqlite3"

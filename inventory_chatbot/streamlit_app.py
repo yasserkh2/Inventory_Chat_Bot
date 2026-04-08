@@ -20,6 +20,8 @@ from inventory_chatbot.models.api import ChatRequest
 @st.cache_resource
 def get_router_service():
     config = AppConfig.from_env()
+    config.validate_provider_credentials()
+    config.validate_sql_backend_configuration()
     router = build_router_service(config=config)
     return config, router
 
@@ -108,7 +110,11 @@ def main() -> None:
         layout="wide",
     )
     ensure_state()
-    config, router = get_router_service()
+    try:
+        config, router = get_router_service()
+    except Exception as exc:  # pragma: no cover - UI initialization safety
+        st.error(f"Startup error: {exc}")
+        st.stop()
 
     st.title("Inventory Data Chatbot")
     st.caption("Chat with the schema and the inventory data, with SQL shown for query-backed answers.")

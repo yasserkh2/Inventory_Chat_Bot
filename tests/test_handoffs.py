@@ -40,10 +40,13 @@ class HandoffTests(unittest.TestCase):
     def test_build_planner_activation(self) -> None:
         activation = self.service.build_planner_activation(self.decision)
         self.assertEqual(activation.agent_name, "assets")
-        self.assertEqual(
-            activation.handoff_summary,
+        self.assertIn(
             "Group active assets by site and return the grouped count.",
+            activation.handoff_summary,
         )
+        self.assertIn("Required data contract:", activation.handoff_summary)
+        self.assertIn("Assets(AssetId, Status, SiteId)", activation.handoff_summary)
+        self.assertIn("Sites(SiteId, SiteName)", activation.handoff_summary)
         self.assertEqual(activation.context["required_tables"], ["Assets", "Sites"])
 
     def test_build_dynamic_sql_activation(self) -> None:

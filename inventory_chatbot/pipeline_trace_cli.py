@@ -6,7 +6,6 @@ import sys
 from datetime import date, datetime
 
 from inventory_chatbot.config import AppConfig, ConfigurationError
-from inventory_chatbot.data.memory_repository import InMemoryRepository
 from inventory_chatbot.handoffs.service import OrchestratorHandoffService
 from inventory_chatbot.llm.base import LLMProviderError
 from inventory_chatbot.llm.factory import build_llm_client
@@ -14,13 +13,14 @@ from inventory_chatbot.models.api import TokenUsage
 from inventory_chatbot.models.domain import AgentTask, SessionState
 from inventory_chatbot.orchestrator.llm_based import LLMOrchestrator
 from inventory_chatbot.query_makers.llm_based import LLMQueryMaker
+from inventory_chatbot.runtime.backend_factory import build_data_backend_runtime
 from inventory_chatbot.router.registry import SpecialistRegistry
 from inventory_chatbot.services.date_parser import DateParser
 from inventory_chatbot.specialists.assets import AssetSpecialist
 from inventory_chatbot.specialists.billing import BillingSpecialist
 from inventory_chatbot.specialists.procurement import ProcurementSpecialist
 from inventory_chatbot.specialists.sales import SalesSpecialist
-from inventory_chatbot.sql_execution.service import SQLExecutionService, SQLExecutionServiceError
+from inventory_chatbot.sql_execution.service import SQLExecutionServiceError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,11 +53,12 @@ def main() -> int:
     try:
         config = AppConfig.from_env()
         config.validate_provider_credentials()
-    except ConfigurationError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        runtime = build_data_backend_runtime(config)
+    except (ConfigurationError, RuntimeError, ValueError) as exc:
+        print(f"Configuration/runtime error: {exc}", file=sys.stderr)
         return 1
 
-    repository = InMemoryRepository()
+    repository = runtime.repository
     resolved_today = date.today()
     date_parser = DateParser(today_provider=lambda: resolved_today)
     llm_client = build_llm_client(config)
@@ -81,9 +82,9 @@ def main() -> int:
         llm_client=llm_client,
         today=resolved_today,
         customer_names=customer_names,
-        execution_service=SQLExecutionService(seed_data=repository._data),
+        execution_service=runtime.sql_execution_service,
     )
-    sql_execution_service = SQLExecutionService(seed_data=repository._data)
+    sql_execution_service = runtime.sql_execution_service
     handoff_service = OrchestratorHandoffService()
     session_state = SessionState(session_id=args.session_id)
 

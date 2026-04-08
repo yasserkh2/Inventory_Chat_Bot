@@ -1,3 +1,5 @@
 pydantic
 openai
 streamlit
+sqlalchemy
+pyodbc

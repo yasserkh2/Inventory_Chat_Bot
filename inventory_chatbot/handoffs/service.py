@@ -23,9 +23,10 @@ class OrchestratorHandoffService:
         )
 
     def build_planner_activation(self, decision: OrchestratorDecision) -> PlannerActivation:
+        handoff_summary = self._build_planner_handoff_summary(decision)
         return PlannerActivation(
             agent_name=decision.agent,
-            handoff_summary=decision.handoff_instructions or decision.analysis_summary,
+            handoff_summary=handoff_summary,
             context={
                 "orchestrator": decision.model_dump(mode="json"),
                 "required_tables": [item.table for item in decision.required_data],
@@ -98,3 +99,17 @@ class OrchestratorHandoffService:
         if decision.handoff_instructions:
             details.append(f"Handoff: {decision.handoff_instructions}")
         return " ".join(details)
+
+    @staticmethod
+    def _build_planner_handoff_summary(decision: OrchestratorDecision) -> str:
+        base = (decision.handoff_instructions or decision.analysis_summary or "").strip()
+        if not decision.required_data:
+            return base
+        required_bits = []
+        for item in decision.required_data:
+            columns = ", ".join(item.columns) if item.columns else "*"
+            required_bits.append(f"{item.table}({columns})")
+        required_text = "Required data contract: " + "; ".join(required_bits) + "."
+        if base:
+            return f"{base} {required_text}"
+        return required_text

@@ -7,14 +7,12 @@ from datetime import date
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
 
 from inventory_chatbot.config import AppConfig
-from inventory_chatbot.data.memory_repository import InMemoryRepository
-from inventory_chatbot.dynamic_sql.service import DynamicSQLService
 from inventory_chatbot.llm.base import LLMClient
 from inventory_chatbot.llm.factory import build_llm_client
 from inventory_chatbot.models.api import ChatRequest, TokenUsage
@@ -22,10 +20,10 @@ from inventory_chatbot.orchestrator.llm_based import LLMOrchestrator
 from inventory_chatbot.query_makers.llm_based import LLMQueryMaker
 from inventory_chatbot.router.registry import SpecialistRegistry
 from inventory_chatbot.router.service import RouterService
+from inventory_chatbot.runtime.backend_factory import build_data_backend_runtime
 from inventory_chatbot.services.date_parser import DateParser
 from inventory_chatbot.services.response_formatter import build_response
 from inventory_chatbot.services.session_store import SessionStore
-from inventory_chatbot.sql_execution.service import SQLExecutionService
 from inventory_chatbot.specialists.assets import AssetSpecialist
 from inventory_chatbot.specialists.billing import BillingSpecialist
 from inventory_chatbot.specialists.procurement import ProcurementSpecialist
@@ -37,12 +35,14 @@ LOGGER = logging.getLogger(__name__)
 def build_router_service(
     *,
     config: AppConfig,
-    repository: InMemoryRepository | None = None,
+    repository: Any | None = None,
     llm_client: LLMClient | None = None,
     today_provider: Callable | None = None,
     session_store: SessionStore | None = None,
 ) -> RouterService:
-    repository = repository or InMemoryRepository()
+    runtime = build_data_backend_runtime(config, repository=repository)
+    repository = runtime.repository
+
     date_parser = DateParser(today_provider=today_provider)
     llm_client = llm_client or build_llm_client(config)
     resolved_today = today_provider() if today_provider is not None else date.today()
@@ -54,14 +54,13 @@ def build_router_service(
             SalesSpecialist(repository, date_parser),
         ]
     )
-    sql_execution_service = SQLExecutionService(seed_data=repository._data)
     return RouterService(
         config=config,
         registry=registry,
         session_store=session_store or SessionStore(),
         llm_client=llm_client,
-        dynamic_sql_service=DynamicSQLService(seed_data=repository._data),
-        sql_execution_service=sql_execution_service,
+        dynamic_sql_service=runtime.dynamic_sql_service,
+        sql_execution_service=runtime.sql_execution_service,
         orchestrator=LLMOrchestrator(
             llm_client=llm_client,
             today=resolved_today,
@@ -75,7 +74,7 @@ def build_router_service(
             customer_names=[
                 customer["customer_name"] for customer in repository.list_customers()
             ],
-            execution_service=sql_execution_service,
+            execution_service=runtime.sql_execution_service,
         ),
         customer_names=[customer["customer_name"] for customer in repository.list_customers()],
     )
@@ -140,7 +139,7 @@ def create_server(
     config: AppConfig,
     host: str | None = None,
     port: int | None = None,
-    repository: InMemoryRepository | None = None,
+    repository: Any | None = None,
     llm_client: LLMClient | None = None,
     today_provider: Callable | None = None,
     session_store: SessionStore | None = None,

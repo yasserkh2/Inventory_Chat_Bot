@@ -35,6 +35,61 @@ class ConfigAndModelTests(unittest.TestCase):
         self.assertEqual(config.port, 9000)
         self.assertEqual(config.model_name, "gpt-test")
 
+    def test_config_loads_sql_backend_fields(self) -> None:
+        config = AppConfig.from_env(
+            {
+                "DATA_BACKEND": "sqlserver",
+                "SQLSERVER_HOST": "127.0.0.1",
+                "SQLSERVER_PORT": "1433",
+                "SQLSERVER_DATABASE": "InventoryChatbot",
+                "SQLSERVER_USER": "sa",
+                "SQLSERVER_PASSWORD": "password",
+                "SQLSERVER_DRIVER": "ODBC Driver 18 for SQL Server",
+                "SQLSERVER_ENCRYPT": "false",
+                "SQLSERVER_TRUST_SERVER_CERTIFICATE": "true",
+                "SQLSERVER_CONNECTION_TIMEOUT_SECONDS": "40",
+            }
+        )
+        self.assertEqual(config.data_backend, "sqlserver")
+        self.assertEqual(config.sqlserver_port, 1433)
+        self.assertEqual(config.sqlserver_connection_timeout_seconds, 40)
+        self.assertEqual(config.sqlserver_encrypt, False)
+        self.assertEqual(config.sqlserver_trust_server_certificate, True)
+
+    def test_sql_backend_configuration_validation_requires_fields(self) -> None:
+        config = AppConfig(
+            data_backend="sqlserver",
+            provider="openai",
+            openai_api_key="test-key",
+            sqlserver_host="127.0.0.1",
+            sqlserver_port=1433,
+            sqlserver_database=None,
+            sqlserver_user="sa",
+            sqlserver_password=None,
+        )
+        with self.assertRaises(ConfigurationError):
+            config.validate_sql_backend_configuration()
+
+    def test_config_loads_sqlite_backend_fields(self) -> None:
+        config = AppConfig.from_env(
+            {
+                "DATA_BACKEND": "sqlite",
+                "SQLITE_DATABASE_PATH": "local/inventory.sqlite3",
+            }
+        )
+        self.assertEqual(config.data_backend, "sqlite")
+        self.assertEqual(config.sqlite_database_path, "local/inventory.sqlite3")
+
+    def test_sqlite_backend_configuration_requires_database_path(self) -> None:
+        config = AppConfig(
+            data_backend="sqlite",
+            provider="openai",
+            openai_api_key="test-key",
+            sqlite_database_path="   ",
+        )
+        with self.assertRaises(ConfigurationError):
+            config.validate_sql_backend_configuration()
+
     def test_config_can_merge_yaml_dotenv_and_env_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

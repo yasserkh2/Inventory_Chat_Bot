@@ -102,9 +102,11 @@ def build_orchestrator_user_prompt(
         "- Route to billing for Bills and vendor billing or invoice questions.\n"
         "- Route to procurement for PurchaseOrders and PurchaseOrderLines questions.\n"
         "- Route to sales for SalesOrders, SalesOrderLines, and Customers questions.\n"
+        "- Translate business words to canonical schema references in required_data and handoff instructions (example: currency -> Bills.Currency).\n"
+        "- Never treat a column name as a table name.\n"
         "- Route greetings, schema explanations, table discovery, column discovery, and relationship explanations to chat.\n"
         "- If the user asks to retrieve rows, inspect records, list data, or compute a metric, do not choose chat.\n"
-        "- If a critical business detail is missing, set clarification_needed to true and ask one concise question.\n"
+        "- If the query is vague (missing metric target, entity, or date/filter context), set clarification_needed to true and ask one concise question.\n"
         "- If previous review feedback is present, fix those issues in this pass instead of repeating the same draft.\n"
         "- If unsupported, return agent as none.\n"
     )

@@ -48,22 +48,28 @@ class SQLReviewService:
         if not sql:
             raise ValueError("SQL query is empty.")
 
-        select_match = re.match(
-            r"(?is)^SELECT\s+(?:(?P<distinct>DISTINCT)\s+)?(?:TOP\s+(?P<top>\d+)\s+)?(?P<select>.+?)\s+FROM\s+(?P<rest>.+)$",
-            sql,
-        )
+        select_match = re.match(r"(?is)^SELECT\s+(?P<select>.+?)\s+FROM\s+(?P<rest>.+)$", sql)
         if select_match is None:
             raise ValueError("SQL must start with SELECT ... FROM ...")
 
-        has_distinct = bool(select_match.group("distinct"))
-        limit = int(select_match.group("top")) if select_match.group("top") else None
-        select_section = select_match.group("select")
+        select_section, has_distinct, limit = self._extract_select_modifiers(
+            select_match.group("select")
+        )
         remainder = select_match.group("rest")
 
         from_section, remainder = self._split_next_clause(remainder, ("WHERE", "GROUP BY", "ORDER BY"))
-        base_table, joins = self._parse_from_section(from_section)
-        filters, group_by, order_by = self._parse_tail_sections(remainder)
-        selects, aggregates = self._parse_selects(select_section)
+        base_table, joins, alias_lookup = self._parse_from_section(from_section)
+        remainder, trailing_limit = self._extract_trailing_limit(remainder)
+        if limit is not None and trailing_limit is not None:
+            raise ValueError("Multiple row-limit clauses are not supported.")
+        if limit is None:
+            limit = trailing_limit
+        selects, aggregates, select_alias_lookup = self._parse_selects(select_section, alias_lookup)
+        filters, group_by, order_by = self._parse_tail_sections(remainder, alias_lookup)
+        group_by = [
+            select_alias_lookup.get(group_expression.lower(), group_expression)
+            for group_expression in group_by
+        ]
         if has_distinct:
             if aggregates:
                 raise ValueError("DISTINCT with aggregate expressions is not supported.")
@@ -84,6 +90,41 @@ class SQLReviewService:
         )
 
     @staticmethod
+    def _extract_trailing_limit(remainder: str) -> tuple[str, int | None]:
+        text = remainder.strip()
+        if not text:
+            return text, None
+        match = re.match(r"(?is)^(?P<body>.+?)\s+LIMIT\s+(?P<limit>\d+)\s*$", text)
+        if match is None:
+            return text, None
+        return match.group("body").strip(), int(match.group("limit"))
+
+    def _extract_select_modifiers(self, select_section: str) -> tuple[str, bool, int | None]:
+        text = select_section.strip()
+        has_distinct = False
+        limit: int | None = None
+
+        while True:
+            modifier_applied = False
+            if re.match(r"(?is)^DISTINCT\b", text):
+                has_distinct = True
+                text = re.sub(r"(?is)^DISTINCT\b", "", text, count=1).strip()
+                modifier_applied = True
+            top_match = re.match(r"(?is)^TOP\s*\(?(?P<limit>\d+)\)?\s+(?P<rest>.+)$", text)
+            if top_match is not None:
+                if limit is not None:
+                    raise ValueError("Multiple TOP clauses are not supported.")
+                limit = int(top_match.group("limit"))
+                text = top_match.group("rest").strip()
+                modifier_applied = True
+            if not modifier_applied:
+                break
+
+        if not text:
+            raise ValueError("SELECT must include at least one select expression.")
+        return text, has_distinct, limit
+
+    @staticmethod
     def _split_next_clause(text: str, keywords: tuple[str, ...]) -> tuple[str, str]:
         upper_text = text.upper()
         positions = [upper_text.find(f" {keyword} ") for keyword in keywords if f" {keyword} " in upper_text]
@@ -92,33 +133,55 @@ class SQLReviewService:
         next_position = min(positions)
         return text[:next_position].strip(), text[next_position + 1 :].strip()
 
-    def _parse_from_section(self, from_section: str) -> tuple[str, list[JoinSpec]]:
-        segments = re.split(r"(?i)\s+INNER\s+JOIN\s+", from_section)
-        base_table = segments[0].strip()
-        if " " in base_table:
-            raise ValueError("Base table aliases are not supported. Use canonical table names only.")
-        self._require_table(base_table)
+    def _parse_from_section(self, from_section: str) -> tuple[str, list[JoinSpec], dict[str, str]]:
+        segments = re.split(r"(?i)\s+(?:INNER\s+)?JOIN\s+", from_section)
+        base_table, base_aliases = self._parse_table_reference(segments[0].strip())
+        alias_lookup = dict(base_aliases)
 
         joins: list[JoinSpec] = []
         for join_segment in segments[1:]:
-            match = re.match(r"(?is)^(?P<table>\w+)\s+ON\s+(?P<left>[\w.]+)\s*=\s*(?P<right>[\w.]+)$", join_segment.strip())
+            match = re.match(
+                r"(?is)^(?P<table_ref>.+?)\s+ON\s+(?P<left>[\w.]+)\s*=\s*(?P<right>[\w.]+)$",
+                join_segment.strip(),
+            )
             if match is None:
                 raise ValueError(f"Unsupported JOIN clause: {join_segment}")
-            table_name = match.group("table")
-            if "." in table_name:
-                raise ValueError(f"Invalid joined table name: {table_name}")
-            self._require_table(table_name)
+            table_name, table_aliases = self._parse_table_reference(match.group("table_ref"))
+            for alias_key, resolved_table in table_aliases.items():
+                existing = alias_lookup.get(alias_key)
+                if existing is not None and existing != resolved_table:
+                    raise ValueError(
+                        f"Alias '{alias_key}' maps to multiple tables: {existing} and {resolved_table}."
+                    )
+                alias_lookup[alias_key] = resolved_table
             joins.append(
                 JoinSpec(
-                    left=match.group("left"),
-                    right=match.group("right"),
+                    left=self._normalize_column_reference(match.group("left"), alias_lookup),
+                    right=self._normalize_column_reference(match.group("right"), alias_lookup),
                     join_type="INNER",
                 )
             )
-        return base_table, joins
+        return base_table, joins, alias_lookup
+
+    def _parse_table_reference(self, table_reference: str) -> tuple[str, dict[str, str]]:
+        match = re.match(
+            r"(?is)^(?P<table>\w+)(?:\s+(?:AS\s+)?(?P<alias>\w+))?$",
+            table_reference.strip(),
+        )
+        if match is None:
+            raise ValueError(f"Unsupported table reference: {table_reference}")
+        table_name = match.group("table")
+        if "." in table_name:
+            raise ValueError(f"Invalid table name: {table_name}")
+        self._require_table(table_name)
+        alias = match.group("alias")
+        aliases: dict[str, str] = {table_name.lower(): table_name}
+        if alias:
+            aliases[alias.lower()] = table_name
+        return table_name, aliases
 
     def _parse_tail_sections(
-        self, remainder: str
+        self, remainder: str, alias_lookup: dict[str, str]
     ) -> tuple[list[FilterSpec], list[str], list[OrderBySpec]]:
         filters: list[FilterSpec] = []
         group_by: list[str] = []
@@ -140,16 +203,23 @@ class SQLReviewService:
             order_section = text[9:].strip()
 
         if where_section:
-            filters = self._parse_filters(where_section)
+            filters = self._parse_filters(where_section, alias_lookup)
         if group_section:
-            group_by = [part.strip() for part in self._split_csv(group_section) if part.strip()]
+            group_by = [
+                self._normalize_column_reference(part.strip(), alias_lookup)
+                for part in self._split_csv(group_section)
+                if part.strip()
+            ]
         if order_section:
-            order_by = self._parse_order_by(order_section)
+            order_by = self._parse_order_by(order_section, alias_lookup)
         return filters, group_by, order_by
 
-    def _parse_selects(self, select_section: str) -> tuple[list[SelectSpec], list[AggregateSpec]]:
+    def _parse_selects(
+        self, select_section: str, alias_lookup: dict[str, str]
+    ) -> tuple[list[SelectSpec], list[AggregateSpec], dict[str, str]]:
         selects: list[SelectSpec] = []
         aggregates: list[AggregateSpec] = []
+        select_alias_lookup: dict[str, str] = {}
         for part in self._split_csv(select_section):
             item = part.strip()
             aggregate_match = re.match(
@@ -158,11 +228,16 @@ class SQLReviewService:
             )
             if aggregate_match is not None:
                 function, column, alias = aggregate_match.groups()
+                resolved_column = (
+                    column
+                    if column == "*"
+                    else self._normalize_column_reference(column, alias_lookup)
+                )
                 aggregates.append(
                     AggregateSpec(
                         function=function.upper(),
-                        column=column,
-                        alias=alias or f"{function.upper()}_{column.replace('.', '_')}",
+                        column=resolved_column,
+                        alias=alias or f"{function.upper()}_{resolved_column.replace('.', '_')}",
                     )
                 )
                 continue
@@ -171,10 +246,15 @@ class SQLReviewService:
             if select_match is None:
                 raise ValueError(f"Unsupported SELECT item: {item}")
             column, alias = select_match.groups()
-            selects.append(SelectSpec(column=column, alias=alias))
-        return selects, aggregates
+            resolved_column = self._normalize_column_reference(column, alias_lookup)
+            selects.append(SelectSpec(column=resolved_column, alias=alias))
+            if alias:
+                select_alias_lookup[alias.lower()] = resolved_column
+        return selects, aggregates, select_alias_lookup
 
-    def _parse_filters(self, where_section: str) -> list[FilterSpec]:
+    def _parse_filters(
+        self, where_section: str, alias_lookup: dict[str, str]
+    ) -> list[FilterSpec]:
         clauses = self._split_and_conditions(where_section)
         filters: list[FilterSpec] = []
         for clause in clauses:
@@ -186,7 +266,7 @@ class SQLReviewService:
                 column, start, end = between_match.groups()
                 filters.append(
                     FilterSpec(
-                        column=column,
+                        column=self._normalize_column_reference(column, alias_lookup),
                         operator="BETWEEN",
                         value=[self._parse_literal(start), self._parse_literal(end)],
                     )
@@ -198,7 +278,7 @@ class SQLReviewService:
                 column, payload = in_match.groups()
                 filters.append(
                     FilterSpec(
-                        column=column,
+                        column=self._normalize_column_reference(column, alias_lookup),
                         operator="IN",
                         value=[self._parse_literal(item) for item in self._split_csv(payload)],
                     )
@@ -211,22 +291,37 @@ class SQLReviewService:
             column, operator, value = binary_match.groups()
             filters.append(
                 FilterSpec(
-                    column=column,
+                    column=self._normalize_column_reference(column, alias_lookup),
                     operator=operator.upper(),
                     value=self._parse_literal(value),
                 )
             )
         return filters
 
-    def _parse_order_by(self, order_section: str) -> list[OrderBySpec]:
+    def _parse_order_by(
+        self, order_section: str, alias_lookup: dict[str, str]
+    ) -> list[OrderBySpec]:
         items: list[OrderBySpec] = []
         for part in self._split_csv(order_section):
             match = re.match(r"(?is)^([\w.]+)(?:\s+(ASC|DESC))?$", part.strip())
             if match is None:
                 raise ValueError(f"Unsupported ORDER BY item: {part}")
             expression, direction = match.groups()
-            items.append(OrderBySpec(expression=expression, direction=(direction or "ASC").upper()))
+            items.append(
+                OrderBySpec(
+                    expression=self._normalize_column_reference(expression, alias_lookup),
+                    direction=(direction or "ASC").upper(),
+                )
+            )
         return items
+
+    @staticmethod
+    def _normalize_column_reference(column_reference: str, alias_lookup: dict[str, str]) -> str:
+        if "." not in column_reference:
+            return column_reference
+        table_token, column_name = column_reference.split(".", 1)
+        canonical_table = alias_lookup.get(table_token.lower(), table_token)
+        return f"{canonical_table}.{column_name}"
 
     @staticmethod
     def _split_csv(text: str) -> list[str]:
@@ -286,6 +381,12 @@ class SQLReviewService:
             used_tables.add(join.right.split(".", 1)[0])
         for query_filter in plan.filters:
             used_tables.add(query_filter.column.split(".", 1)[0])
+        for group_by_expression in plan.group_by:
+            if "." in group_by_expression:
+                used_tables.add(group_by_expression.split(".", 1)[0])
+        for order_by_expression in plan.order_by:
+            if "." in order_by_expression.expression:
+                used_tables.add(order_by_expression.expression.split(".", 1)[0])
         disallowed = sorted(table for table in used_tables if table not in set(allowed_tables))
         if disallowed:
             raise ValueError(
